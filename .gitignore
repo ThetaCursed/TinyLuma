@@ -1,0 +1,27 @@
+# ---- Rust / Cargo build output ----
+/target
+**/*.rs.bk
+*.pdb
+
+# ---- TinyLuma runtime data (created next to the executable) ----
+/config
+/luts
+
+# ---- Secrets / local environment ----
+.env
+.env.*
+*.local
+
+# ---- OS junk ----
+.DS_Store
+Thumbs.db
+desktop.ini
+*.lnk
+
+# ---- Editors / IDEs ----
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.aider*
