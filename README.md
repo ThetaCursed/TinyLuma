@@ -12,6 +12,8 @@ Enhance Stable Diffusion, Midjourney, Flux, and ComfyUI generations in seconds.
 
 [Features](#key-features) • [Why TinyLuma?](#why-tinyluma) • [AI Detail Engine](#engineered-for-ai-generations) • [Metadata Preservation](#comfyui--ai-metadata-preservation) • [Download](#download--quick-start)
 
+<img src="assets/screenshot-editor.webp" alt="TinyLuma editor — before/after split view with the LUT library and Oklab controls" width="880">
+
 </div>
 
 ## Overview
