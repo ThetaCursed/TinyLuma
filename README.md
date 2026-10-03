@@ -14,15 +14,11 @@ Enhance Stable Diffusion, Midjourney, Flux, and ComfyUI generations in seconds.
 
 </div>
 
----
-
 ## Overview
 
 **TinyLuma** is a fast, standalone desktop photo editor designed specifically for finishing AI-generated artwork and photo sets. Instead of waiting for heavy creative suites (Lightroom, Photoshop) to launch, TinyLuma provides a focused, bloat-free workflow with professional Oklab color science, custom-tuned detail recovery, `.cube` LUT support, and instant batch processing.
 
 No Electron, no web runtime, no subscriptions — a single native executable under **8 MB**.
-
----
 
 ## Key Features
 
@@ -33,8 +29,6 @@ No Electron, no web runtime, no subscriptions — a single native executable und
 - **🎞️ Batch Workflow & Filmstrip:** Navigate multi-image sessions, use **Preset to All** to sync looks across an entire generation batch, and export with background threading.
 - **🎭 Complete 3D LUT System:** Direct `.cube` LUT library integration with subfolder categorization, search, favorites (★), and intensity blending (0–100%).
 - **⚖️ Before / After Split Screen:** Interactive draggable split divider to compare edits, instantly toggled with the `\` key.
-
----
 
 ## Why TinyLuma?
 
@@ -47,8 +41,6 @@ No Electron, no web runtime, no subscriptions — a single native executable und
 | **LUT Workflow** | Buried in submenus | **Instant visual library & blending** |
 | **Memory Footprint** | Heavy (>1 GB idle) | **Strictly bounded LRU cache** |
 
----
-
 ## Engineered for AI Generations
 
 Raw AI images (Stable Diffusion, Midjourney, Flux) often suffer from common artifacts: flat lighting, low local contrast, and unnatural "plastic" skin textures. TinyLuma solves this at the algorithm level:
@@ -60,16 +52,12 @@ Raw AI images (Stable Diffusion, Midjourney, Flux) often suffer from common arti
 
 *All spatial radii scale dynamically to exported resolution, ensuring identical results between preview and full-res renders.*
 
----
-
 ## ComfyUI & AI Metadata Preservation (Optional)
 
 Most editors silently wipe workflow metadata, while others force-embed it. TinyLuma gives you **full privacy control with a simple toggle**:
 
 - **Keep Workflows (Opt-In):** Copies `tEXt`, `zTXt`, `iTXt`, and `eXIf` data from source to export. Drop your edited PNG straight back into ComfyUI or Automatic1111 to reload your exact prompt, seed, and node graph.
 - **Protect Your Privacy (Opt-Out):** Uncheck the metadata box to export completely clean images — no leaked prompts, models, LoRAs, or generation settings.
-
----
 
 ## Keyboard Shortcuts
 
@@ -82,8 +70,6 @@ Most editors silently wipe workflow metadata, while others force-embed it. TinyL
 | `Ctrl + 0` | Fit to Viewport |
 | `Delete` / `Backspace` | Remove frame from session |
 | `Space + Drag` | Pan canvas |
-
----
 
 ## Download & Quick Start
 
@@ -101,8 +87,6 @@ cargo build --release
 
 The optimized binary will be compiled to `target/release/TinyLuma.exe`.
 
----
-
 ## Folder Structure
 
 Place your custom `.cube` 3D LUTs inside the `luts/` directory. Subfolders will automatically turn into categories inside the UI:
@@ -118,8 +102,6 @@ TinyLuma/
         └── Moody_Teal.cube
 ```
 
----
-
 ## Supported Formats
 
 - **Exports:** 
@@ -127,7 +109,6 @@ TinyLuma/
   - **JPEG** (Lossy, configurable quality 1–100, default 90)
   - **WebP** (Lossy, configurable quality 1–100, optimized for web/social sharing)
 
----
 
 ## License
 
