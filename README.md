@@ -9,6 +9,7 @@ Enhance Stable Diffusion, Midjourney, Flux, and ComfyUI generations in seconds.
 [![Language](https://img.shields.io/badge/Language-Rust_2024-orange.svg)](https://www.rust-lang.org/)
 [![Binary Size](https://img.shields.io/badge/Binary_Size-~8_MB-success.svg)](#)
 [![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey.svg)](#)
+[![Download](https://img.shields.io/badge/Download-TinyLuma_v1.0.0-blue?logo=windows&logoColor=white)](https://github.com/ThetaCursed/TinyLuma/releases/download/v1.0.0/TinyLuma-v1.0.0-windows-x64.zip)
 
 [Features](#key-features) • [Why TinyLuma?](#why-tinyluma) • [AI Detail Engine](#engineered-for-ai-generations) • [Metadata Preservation](#comfyui--ai-metadata-preservation-optional) • [Download](#download--quick-start)
 
@@ -25,7 +26,7 @@ No Electron, no web runtime, no subscriptions — a single native executable und
 ## Key Features
 
 - **⚡ Blazing Fast & Ultra-Lightweight (~8 MB):** Built with pure Rust and `egui`. Starts instantly, uses minimal RAM, and renders edits at 60 FPS via multi-threaded Rayon pipelines and 3D LUT caching.
-- **🧠 Custom AI Detail Engine:** Proprietary algorithms for `Texture`, `Clarity`, and `Sharpen` tuned specifically to eliminate smooth AI "plastic skin" and restore micro-contrast without edge halos.
+- **🧠 Custom AI Detail Engine:** Algorithms for `Texture`, `Clarity`, and `Sharpen` tuned specifically to eliminate smooth AI "plastic skin" and restore micro-contrast without edge halos.
 - **🧬 ComfyUI & A1111 Metadata Preservation:** Exported PNGs retain raw prompt and node graph metadata (`tEXt`, `zTXt`, `iTXt` chunks). Your ComfyUI workflow stays intact.
 - **🎨 Oklab Perceptual Color Grading:** 16 non-destructive controls (Light, Color, Details, Effects) powered by Oklab color space and Bradford chromatic adaptation to avoid color shifts and clipping.
 - **🎞️ Batch Workflow & Filmstrip:** Navigate multi-image sessions, use **Preset to All** to sync looks across an entire generation batch, and export with background threading.
@@ -76,7 +77,10 @@ Most editors silently wipe workflow metadata, while others force-embed it. TinyL
 ## Download & Quick Start
 
 ### Pre-built Binaries
-Download the latest standalone executable from the Releases tab. No installation required.
+[⬇ **Download TinyLuma v1.0.0 — Windows x64**](https://github.com/ThetaCursed/TinyLuma/releases/download/v1.0.0/TinyLuma-v1.0.0-windows-x64.zip)
+
+Standalone `.zip` (~8 MB) — no installation required. Includes **9 curated starter LUTs**.  
+Just unpack and run `TinyLuma.exe`.
 
 ### Build from Source
 Ensure you have Rust 1.95+ installed:
