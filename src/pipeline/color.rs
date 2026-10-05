@@ -25,6 +25,15 @@ const TINT_DUV_SCALE: f32 = 0.02;
 const CHROMA_MAX: f32 = 0.32;
 /// Vibrance protection exponent (higher protects saturated colors more).
 const VIBRANCE_PROTECTION: f32 = 2.0;
+/// Saturation compression: already-saturated colours get less boost, matching
+/// the way RapidRAW's RGB gamut limits their saturation growth.
+const SATURATION_COMPRESSION: f32 = 0.5;
+/// Negative-vibrance desaturation window (as in RapidRAW).
+///
+/// `sat` is an Oklab-chroma proxy for HSV saturation (`~2·C/CHROMA_MAX`); below
+/// `LO` nothing happens, above `HI` a `-100` slider fully desaturates.
+const VIBRANCE_DESAT_LO: f32 = 0.05;
+const VIBRANCE_DESAT_HI: f32 = 0.75;
 
 type Mat3 = [[f32; 3]; 3];
 
@@ -203,18 +212,36 @@ impl WhiteBalance {
     }
 }
 
-/// Saturation: scales chroma `a,b` by `1 + amount`.
+#[inline]
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Saturation: scales chroma `a,b`, with a light compression so already
+/// saturated colours grow less (as in RapidRAW, where the RGB gamut limits
+/// their growth). Negative amounts stay a plain uniform desaturation.
 #[inline]
 pub(crate) fn apply_saturation(p: &mut [f32; 3], amount: f32) {
     if amount.abs() < 1e-6 {
         return;
     }
-    let f = 1.0 + amount;
+    let f = if amount > 0.0 {
+        let chroma = (p[1] * p[1] + p[2] * p[2]).sqrt();
+        let norm = (chroma / CHROMA_MAX).min(1.0);
+        1.0 + amount * (1.0 - SATURATION_COMPRESSION * norm)
+    } else {
+        1.0 + amount
+    };
     p[1] *= f;
     p[2] *= f;
 }
 
 /// Vibrance: boosts weakly saturated colors more than saturated ones.
+///
+/// Positive side keeps the legacy protection (muted colours change most).
+/// Negative side follows RapidRAW: saturated colours are desaturated while
+/// near-neutrals are left alone.
 #[inline]
 pub(crate) fn apply_vibrance(p: &mut [f32; 3], amount: f32) {
     if amount.abs() < 1e-6 {
@@ -222,8 +249,14 @@ pub(crate) fn apply_vibrance(p: &mut [f32; 3], amount: f32) {
     }
     let chroma = (p[1] * p[1] + p[2] * p[2]).sqrt();
     let norm = (chroma / CHROMA_MAX).min(1.0);
-    let pf = (1.0 - norm).powf(VIBRANCE_PROTECTION);
-    let scale = 1.0 + amount * pf;
+    let scale = if amount > 0.0 {
+        let pf = (1.0 - norm).powf(VIBRANCE_PROTECTION);
+        1.0 + amount * pf
+    } else {
+        let sat = (norm * 2.0).min(1.0);
+        let w = smoothstep(VIBRANCE_DESAT_LO, VIBRANCE_DESAT_HI, sat);
+        1.0 + amount * w
+    };
     p[1] *= scale;
     p[2] *= scale;
 }
@@ -504,6 +537,36 @@ mod tests {
         let low_gain = (low[1] * low[1] + low[2] * low[2]).sqrt() / low_before;
         let high_gain = (high[1] * high[1] + high[2] * high[2]).sqrt() / high_before;
         assert!(low_gain > high_gain, "low {low_gain} vs high {high_gain}");
+    }
+
+    #[test]
+    fn saturation_compresses_high_chroma() {
+        // A saturated colour must gain less than the full `1 + amount`.
+        let mut p = [0.5f32, 0.25, 0.0]; // norm ~ 0.78
+        let before = (p[1] * p[1] + p[2] * p[2]).sqrt();
+        apply_saturation(&mut p, 1.0);
+        let gain = (p[1] * p[1] + p[2] * p[2]).sqrt() / before;
+        assert!(gain > 1.0 && gain < 2.0, "gain = {gain}");
+    }
+
+    #[test]
+    fn vibrance_negative_desaturates_saturated_more() {
+        // RapidRAW-like: negative vibrance nearly greys saturated colours while
+        // leaving near-neutrals almost untouched.
+        let mut saturated = [0.5f32, 0.28, 0.0];
+        let mut muted = [0.5f32, 0.02, 0.0];
+        let sat_before = (saturated[1] * saturated[1] + saturated[2] * saturated[2]).sqrt();
+        let muted_before = (muted[1] * muted[1] + muted[2] * muted[2]).sqrt();
+        apply_vibrance(&mut saturated, -1.0);
+        apply_vibrance(&mut muted, -1.0);
+        let sat_gain =
+            (saturated[1] * saturated[1] + saturated[2] * saturated[2]).sqrt() / sat_before;
+        let muted_gain = (muted[1] * muted[1] + muted[2] * muted[2]).sqrt() / muted_before;
+        assert!(
+            sat_gain < muted_gain,
+            "sat {sat_gain} vs muted {muted_gain}"
+        );
+        assert!(sat_gain < 0.2, "saturated should grey out: {sat_gain}");
     }
 
     #[test]

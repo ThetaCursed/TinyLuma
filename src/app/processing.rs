@@ -12,7 +12,7 @@ use crate::color::oklab::{linear_to_srgb, rgb_to_oklab, srgb_u8_linear_table};
 use crate::lut::Lut3D;
 use crate::pipeline::color::{ColorSettings, WhiteBalance, apply_chroma, gamut_map_linear};
 use crate::pipeline::light::{
-    LightSettings, apply_light, contrast_from_slider, unit_from_slider,
+    LightSettings, apply_light, contrast_from_slider, exposure_from_slider, unit_from_slider,
 };
 use crate::settings::FilterSettings;
 
@@ -58,7 +58,7 @@ impl TinyLumaApp {
         let wb = WhiteBalance::new(settings.temp, settings.tint);
 
         let light = LightSettings {
-            exposure: settings.exposure,
+            exposure: exposure_from_slider(settings.exposure),
             contrast: contrast_from_slider(settings.contrast),
             highlights: unit_from_slider(settings.highlights),
             shadows: unit_from_slider(settings.shadows),
@@ -183,11 +183,15 @@ impl TinyLumaApp {
         let n_texture = settings.texture / 100.0;
         let n_sharpen = settings.sharpen / 100.0;
 
-        // Sharpen: luma blur (separable Gaussian) with a radius normalized
-        // to the resolution.
+        // Sharpen: luma blur (separable Gaussian) with a fractional radius
+        // proportional to the resolution, so the effect is scale-invariant.
         let sharpen_blur = if n_sharpen > 0.0 {
-            let r = (detail_scale.round() as usize).max(1);
-            Some(Self::gaussian_blur_map(luma_map, width, height, r))
+            Some(Self::gaussian_blur_map(
+                luma_map,
+                width,
+                height,
+                detail_scale,
+            ))
         } else {
             None
         };
@@ -423,11 +427,9 @@ impl TinyLumaApp {
             .max(1.0) as usize
     }
 
-    /// Separable Gaussian blur of a single-channel map.
-    ///
-    /// The radius scales with resolution; with `radius = 1` the weights match
-    /// the classic 1-2-1 kernel (σ = 0.85·r).
-    fn gaussian_blur_map(src: &[f32], w: usize, h: usize, radius: usize) -> Vec<f32> {
+    /// Normalized 1D Gaussian kernel, half-width `radius`, σ = 0.85·radius.
+    /// With `radius = 1` this is the classic 1-2-1 kernel.
+    fn gaussian_kernel(radius: usize) -> Vec<f32> {
         let radius = radius.max(1);
         let sigma = radius as f32 * 0.85;
         let mut kernel = vec![0.0f32; 2 * radius + 1];
@@ -440,15 +442,21 @@ impl TinyLumaApp {
         for k in &mut kernel {
             *k /= ksum;
         }
+        kernel
+    }
 
+    /// Separable convolution of a single-channel map with a 1D `kernel`
+    /// (its half-width is `(kernel.len() - 1) / 2`).
+    fn convolve_separable(src: &[f32], w: usize, h: usize, kernel: &[f32]) -> Vec<f32> {
+        let radius = (kernel.len() - 1) / 2;
         let mut tmp = vec![0.0f32; w * h];
         tmp.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
             let base = y * w;
             for (x, out) in row.iter_mut().enumerate() {
                 let mut acc = 0.0f32;
                 for (k, &kv) in kernel.iter().enumerate() {
-                    let sx = (x as isize + k as isize - radius as isize)
-                        .clamp(0, w as isize - 1) as usize;
+                    let sx = (x as isize + k as isize - radius as isize).clamp(0, w as isize - 1)
+                        as usize;
                     acc += src[base + sx] * kv;
                 }
                 *out = acc;
@@ -460,14 +468,45 @@ impl TinyLumaApp {
             for (x, o) in row.iter_mut().enumerate() {
                 let mut acc = 0.0f32;
                 for (k, &kv) in kernel.iter().enumerate() {
-                    let sy = (y as isize + k as isize - radius as isize)
-                        .clamp(0, h as isize - 1) as usize;
+                    let sy = (y as isize + k as isize - radius as isize).clamp(0, h as isize - 1)
+                        as usize;
                     acc += tmp[sy * w + x] * kv;
                 }
                 *o = acc;
             }
         });
         out
+    }
+
+    /// Separable Gaussian blur of a single-channel map with a **fractional**
+    /// radius that scales with resolution.
+    ///
+    /// At integer radii the weights are exactly the legacy kernel (`radius = 1`
+    /// → 1-2-1). Between integers the two neighbouring integer kernels are
+    /// blended *before* the convolution (valid because convolution is linear),
+    /// so the blur grows smoothly instead of in integer steps — this removed the
+    /// weak-sharpen dip in the 1.2–1.8 MP range — while still costing a single
+    /// separable pass.
+    fn gaussian_blur_map(src: &[f32], w: usize, h: usize, radius: f32) -> Vec<f32> {
+        let r0 = radius.floor().max(1.0) as usize;
+        let frac = (radius - r0 as f32).clamp(0.0, 1.0);
+        if frac < 1e-4 {
+            return Self::convolve_separable(src, w, h, &Self::gaussian_kernel(r0));
+        }
+        let k0 = Self::gaussian_kernel(r0);
+        let k1 = Self::gaussian_kernel(r0 + 1);
+        let half = r0 + 1;
+        let mut kernel = vec![0.0f32; 2 * half + 1];
+        for (i, k) in kernel.iter_mut().enumerate() {
+            let d = i as isize - half as isize;
+            let v0 = if d.unsigned_abs() <= r0 {
+                k0[(d + r0 as isize) as usize]
+            } else {
+                0.0
+            };
+            *k = v0 * (1.0 - frac) + k1[i] * frac;
+        }
+        Self::convolve_separable(src, w, h, &kernel)
     }
 
     /// Bilinear sampling of the RGB texture base.
@@ -1090,10 +1129,31 @@ mod tests {
         let (w, h) = (5usize, 1usize);
         let mut src = vec![0.0f32; w * h];
         src[2] = 1.0;
-        let out = TinyLumaApp::gaussian_blur_map(&src, w, h, 1);
+        let out = TinyLumaApp::gaussian_blur_map(&src, w, h, 1.0);
         assert!((out[1] - 0.25).abs() < 5e-3, "left {}", out[1]);
         assert!((out[2] - 0.5).abs() < 5e-3, "center {}", out[2]);
         assert!((out[3] - 0.25).abs() < 5e-3, "right {}", out[3]);
+    }
+
+    #[test]
+    fn gaussian_blur_fractional_radius_interpolates() {
+        // A fractional radius must spread strictly between the two neighbouring
+        // integer radii — the old `round()` made it stick to one of them, which
+        // caused the weak-sharpen dip around 1.2–1.8 MP.
+        let (w, h) = (9usize, 1usize);
+        let mut src = vec![0.0f32; w * h];
+        src[4] = 1.0;
+        let spread = |b: &[f32]| -> f32 {
+            b.iter()
+                .enumerate()
+                .map(|(i, v)| (i as f32 - 4.0).abs() * v)
+                .sum()
+        };
+        let b1 = TinyLumaApp::gaussian_blur_map(&src, w, h, 1.0);
+        let b2 = TinyLumaApp::gaussian_blur_map(&src, w, h, 2.0);
+        let bf = TinyLumaApp::gaussian_blur_map(&src, w, h, 1.5);
+        let (s1, sf, s2) = (spread(&b1), spread(&bf), spread(&b2));
+        assert!(s1 < sf && sf < s2, "spread {s1} < {sf} < {s2}");
     }
 
     #[test]

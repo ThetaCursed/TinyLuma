@@ -9,15 +9,31 @@
 //!
 //! References:
 //! - exposure: darktable `basicadj.c` + the Oklab property (`cbrt` LMS);
-//! - contrast: the darktable `basicadj.c` idea (18.42% grey pivot), but the shape
-//!   is an endpoint-preserving logit S-curve (see `apply_contrast`);
+//! - contrast: the darktable `basicadj.c` idea (18.42% grey pivot) with an
+//!   endpoint-preserving logit S-curve plus a midtone chroma coupling (see
+//!   `apply_contrast`);
 //! - highlights/shadows: Lightroom semantics, mask shape from the legacy
 //!   `highlights_shadows.rs`;
-//! - whites/blacks: masked gamma curve (legacy/`whites_blacks.rs`).
+//! - whites: hybrid of a global gain and a masked highlight gamma; blacks: a
+//!   masked gamma curve.
 #![allow(dead_code)] // enabled during integration (M4)
 
 /// Contrast pivot: `cbrt(0.1842)` — 18.42% linear grey in Oklab.
 pub(crate) const CONTRAST_PIVOT: f32 = 0.5686;
+/// Tone-curve strength exponent: `k = 2^(amount · CONTRAST_STRENGTH)`.
+///
+/// Mirrors RapidRAW's `strength = 2^(con · 1.25)`, so `k ∈ [0.42, 2.38]` over
+/// `amount ∈ [-1, 1]` and the curve never collapses to flat grey.
+const CONTRAST_STRENGTH: f32 = 1.25;
+/// Chroma-coupling strength for positive contrast (saturation boost).
+///
+/// At the midtone-mask peak this gives `+60 %` chroma at `amount = +1`.
+const CONTRAST_CHROMA: f32 = 0.6;
+/// Chroma-coupling strength for negative contrast (flattening).
+///
+/// Slightly weaker than the positive side, matching RapidRAW, which
+/// desaturates a little less than it saturates.
+const CONTRAST_CHROMA_NEG: f32 = 0.5;
 
 /// Shadow-zone threshold (its own constant, see the plan).
 const SHADOW_THRESHOLD: f32 = 0.5;
@@ -25,10 +41,17 @@ const SHADOW_THRESHOLD: f32 = 0.5;
 const HIGHLIGHT_THRESHOLD: f32 = 0.5;
 /// Shadow-lift strength (gamma exponent).
 const SHADOW_STRENGTH: f32 = 1.0;
-/// Highlight-recovery strength.
-const HIGHLIGHT_STRENGTH: f32 = 1.0;
+/// Highlight-recovery/boost strength (exponential gamma).
+///
+/// `gamma = 2^(-highlights · HIGHLIGHT_STRENGTH · mask)`. Raised from the old
+/// linear `1/(1+…)` form to match RapidRAW's more aggressive roll-off.
+const HIGHLIGHT_STRENGTH: f32 = 3.0;
 /// Start of the Whites zone.
 const WHITES_EDGE: f32 = 0.6;
+/// Global (whole-range) exposure component of the Whites hybrid, in stops at
+/// `whites = ±1`. RapidRAW's Whites is a pure global gain; the local gamma
+/// below alone diverged strongly, so the two are combined here.
+const WHITES_GLOBAL_EV: f32 = 0.8;
 /// Start of the Blacks zone.
 const BLACKS_EDGE: f32 = 0.4;
 /// Strength of the Whites/Blacks gamma deviation from identity.
@@ -98,16 +121,39 @@ fn sigmoid(y: f32) -> f32 {
     1.0 / (1.0 + (-y).exp())
 }
 
-/// Contrast: endpoint-preserving S-curve pivoted at 18.42% grey.
+/// Midtone mask for the contrast → chroma coupling.
 ///
-/// `f(x) = sigmoid(k·logit(x) + (1−k)·logit(pivot))`, `k = 1 + amount`.
+/// `1` at the contrast pivot, falling smoothly to `0` at both endpoints, so
+/// the extreme zones receive little to no saturation change.
+#[inline]
+fn contrast_chroma_mask(l: f32, pivot: f32) -> f32 {
+    let span = if l < pivot { pivot } else { 1.0 - pivot };
+    let t = ((l - pivot) / span.max(1e-6)).abs().clamp(0.0, 1.0);
+    let m = 1.0 - t * t;
+    m * m
+}
+
+/// Contrast: endpoint-preserving S-curve pivoted at 18.42% grey, plus a
+/// midtone-masked chroma coupling.
+///
+/// `f(x) = sigmoid(k·logit(x) + (1−k)·logit(pivot))`,
+/// `k = 2^(amount · CONTRAST_STRENGTH)`.
 /// Properties:
 /// - `amount = 0` → `k = 1` → identity; monotonic and smooth;
 /// - `f(pivot) = pivot` — the pivot stays fixed for any `amount`;
 /// - for `amount ≥ 0` (boost) `f(0) = 0`, `f(1) = 1` — the endpoints are
 ///   pinned, so nothing exits `[0,1]` and there is no clipping;
-/// - for `amount < 0` (reduce) the extremes are pulled toward the pivot —
-///   down to flat grey `pivot` at `amount = -1`.
+/// - for `amount < 0` (reduce) the extremes are pulled toward the pivot, but
+///   the exponential mapping keeps a floor (`k ≈ 0.42` at `amount = -1`), so
+///   the image flattens without collapsing to a single grey (the old
+///   `k = 1 + amount` hit `k = 0` and erased all tonal structure).
+///
+/// On top of the tone curve, `a`/`b` are scaled by a midtone mask, so raising
+/// contrast also raises saturation and lowering it flattens colours. Lightroom
+/// and RapidRAW get this as a side effect of applying the S-curve per RGB
+/// channel (which stretches the channel differences); doing it only on `L`
+/// left chroma untouched. Scaling both axes together preserves hue exactly and
+/// leaves neutrals (`a = b = 0`) neutral.
 ///
 /// The previous power form `L^(1+amount)·pivot^(−amount)` stretched the white
 /// end up to `pivot^(−amount)` (≈1.76 at the maximum), and `gamut_map` then
@@ -120,8 +166,19 @@ pub(crate) fn apply_contrast(p: &mut [f32; 3], amount: f32) {
     // logit/sigmoid require a strictly open interval — stay away from the poles.
     let x = p[0].clamp(1e-4, 1.0 - 1e-4);
     let pivot = CONTRAST_PIVOT.clamp(1e-4, 1.0 - 1e-4);
-    let k = 1.0 + amount;
+    let k = 2.0f32.powf(amount * CONTRAST_STRENGTH);
     p[0] = sigmoid(k * logit(x) + (1.0 - k) * logit(pivot));
+
+    // Contrast → saturation coupling. Slightly weaker on the negative side,
+    // matching RapidRAW's per-channel behaviour.
+    let coupling = if amount >= 0.0 {
+        CONTRAST_CHROMA
+    } else {
+        CONTRAST_CHROMA_NEG
+    };
+    let scale = 1.0 + amount * coupling * contrast_chroma_mask(x, pivot);
+    p[1] *= scale;
+    p[2] *= scale;
 }
 
 /// Highlights / Shadows: global masks on `L`, endpoint-preserving gamma.
@@ -150,27 +207,35 @@ pub(crate) fn apply_highlights_shadows(p: &mut [f32; 3], highlights: f32, shadow
     };
     // `+` on either of them gives gamma < 1 → L^gamma > L → brighter.
     let gamma_s = 1.0 / (1.0 + shadows * SHADOW_STRENGTH * s_mask);
-    let gamma_h = 1.0 / (1.0 + highlights * HIGHLIGHT_STRENGTH * h_mask);
+    // Exponential highlight gamma: stays strictly positive for both signs (the
+    // old `1/(1+…)` hit a zero denominator at `highlights = -1`) and lets the
+    // strength exceed 1 without inverting the direction.
+    let gamma_h = 2.0f32.powf(-highlights * HIGHLIGHT_STRENGTH * h_mask);
     let gamma = (gamma_s * gamma_h).max(1e-3);
     p[0] = l.powf(gamma);
 }
 
-/// Whites: gamma curve in the highlight zone, endpoint-preserving.
+/// Whites: hybrid of a global gain and a local highlight gamma.
 ///
-/// `L' = L^γ`, where `γ = 1/(1 + whites·w·WB_STRENGTH)` for `whites > 0`
-/// (brighter) and `γ = 1 + |whites|·w·WB_STRENGTH` for `whites < 0` (darker),
-/// with `w = smoothstep(WHITES_EDGE, 1.0, L)` localizing the effect to the
-/// highlights.
+/// RapidRAW (and Lightroom) treat Whites as a white-point move that affects the
+/// whole range, while the legacy TinyLuma shape was purely local. Here a small
+/// global exposure (`2^(whites · WHITES_GLOBAL_EV / 3)` in Oklab `L`, i.e.
+/// `2^(whites · WHITES_GLOBAL_EV)` in linear light) is applied first, then the
+/// endpoint-friendly highlight gamma `L^γ` with
+/// `w = smoothstep(WHITES_EDGE, 1.0, L)`:
+/// `γ = 1/(1 + whites·w·WB_STRENGTH)` for `whites > 0` (brighter) and
+/// `γ = 1 + |whites|·w·WB_STRENGTH` for `whites < 0` (darker).
 ///
-/// Since `1^γ = 1` and `0^γ = 0`, the white point never collapses to grey at
-/// any `whites` — it only asymptotically approaches the boundary. This is the
-/// shape from the reference/legacy (`r.powf(curve)`), unlike the linear `room`,
-/// which dragged `L = 1` down to as low as 0.5 at `whites = -1`.
+/// The global part is kept below 1 stop at the extreme so the missing tone
+/// mapper does not blow the highlights; `gamut_map` soft-clips anything above 1.
 #[inline]
 pub(crate) fn apply_whites(p: &mut [f32; 3], whites: f32) {
     if whites.abs() < 1e-6 || p[0] <= 0.0 {
         return;
     }
+    // Global component (the RapidRAW "white point" part).
+    p[0] *= 2.0f32.powf(whites * WHITES_GLOBAL_EV / 3.0);
+
     let w = smoothstep(WHITES_EDGE, 1.0, p[0]);
     let gamma = if whites > 0.0 {
         1.0 / (1.0 + whites * w * WB_STRENGTH)
@@ -212,19 +277,35 @@ pub(crate) fn apply_light(p: &mut [f32; 3], s: &LightSettings) {
 
 // ─── Slider mapping ───────────────────────────────────────────────
 
-/// Contrast: `slider ∈ [-100, 100]` → `amount = sign(s) * (|s|/100)^2`.
+/// Contrast: `slider ∈ [-100, 100]` → `amount = slider / 100` (linear).
 ///
-/// The square concentrates the useful range in the first half of the slider.
+/// The curve then applies `k = 2^(amount · CONTRAST_STRENGTH)` in
+/// [`apply_contrast`], mirroring RapidRAW/Lightroom's slider response.
 #[inline]
 pub(crate) fn contrast_from_slider(slider: f32) -> f32 {
-    let n = slider / 100.0;
-    n * n.abs()
+    slider / 100.0
 }
 
 /// Plain slider `[-100, 100]` → `[-1, 1]`.
 #[inline]
 pub(crate) fn unit_from_slider(slider: f32) -> f32 {
     slider / 100.0
+}
+
+/// Exposure slider full-scale, in EV (the ends of the `-5..=5` slider).
+const EXPOSURE_MAX_EV: f32 = 5.0;
+/// Exponent of the non-linear exposure response.
+///
+/// `1.0` is the old linear behaviour; `1.5` gives finer control around 0 EV
+/// (where the useful range is) and compresses the extremes. Symmetric:
+/// `EV = EXPOSURE_MAX_EV · sign(n)·|n|^p`, `n = slider / EXPOSURE_MAX_EV`.
+const EXPOSURE_CURVE: f32 = 1.5;
+
+/// Exposure slider → EV mapping (soft around 0, steeper at the ends).
+#[inline]
+pub(crate) fn exposure_from_slider(slider: f32) -> f32 {
+    let n = (slider / EXPOSURE_MAX_EV).clamp(-1.0, 1.0);
+    EXPOSURE_MAX_EV * n * n.abs().powf(EXPOSURE_CURVE - 1.0)
 }
 
 #[cfg(test)]
@@ -234,6 +315,10 @@ mod tests {
 
     fn grey(v: f32) -> [f32; 3] {
         rgb_to_oklab(v, v, v)
+    }
+
+    fn chroma(p: [f32; 3]) -> f32 {
+        (p[1] * p[1] + p[2] * p[2]).sqrt()
     }
 
     #[test]
@@ -320,6 +405,82 @@ mod tests {
     }
 
     #[test]
+    fn contrast_max_negative_does_not_collapse() {
+        // amount = -1 must keep a floor via k = 2^(-1.25) ~= 0.42; the old
+        // `k = 1 + amount` became 0 and flattened everything to the pivot.
+        let mut dark = [0.27f32, 0.0, 0.0];
+        let mut bright = [0.89f32, 0.0, 0.0];
+        apply_contrast(&mut dark, -1.0);
+        apply_contrast(&mut bright, -1.0);
+        assert!(dark[0] < CONTRAST_PIVOT && bright[0] > CONTRAST_PIVOT);
+        assert!(
+            bright[0] - dark[0] > 0.2,
+            "range collapsed: {}..{}",
+            dark[0],
+            bright[0]
+        );
+    }
+
+    #[test]
+    fn contrast_boosts_chroma_of_colors() {
+        // A midtone saturated colour must gain saturation, like the per-channel
+        // S-curves in Lightroom/RapidRAW.
+        let mut p = rgb_to_oklab(0.5, 0.15, 0.05);
+        let before = chroma(p);
+        apply_contrast(&mut p, 0.5);
+        assert!(chroma(p) > before, "chroma {} -> {}", before, chroma(p));
+    }
+
+    #[test]
+    fn contrast_negative_reduces_chroma() {
+        let mut p = rgb_to_oklab(0.5, 0.15, 0.05);
+        let before = chroma(p);
+        apply_contrast(&mut p, -0.5);
+        assert!(chroma(p) < before, "chroma {} -> {}", before, chroma(p));
+    }
+
+    #[test]
+    fn contrast_chroma_coupling_preserves_hue() {
+        // Scaling `a`/`b` together must not rotate the hue (null cross product).
+        let mut p = rgb_to_oklab(0.5, 0.15, 0.05);
+        let (a0, b0) = (p[1], p[2]);
+        apply_contrast(&mut p, 0.7);
+        let cross = a0 * p[2] - b0 * p[1];
+        assert!(cross.abs() < 1e-6, "hue rotated: cross = {cross}");
+    }
+
+    #[test]
+    fn contrast_chroma_coupling_leaves_neutrals_neutral() {
+        let mut p = grey(0.4);
+        let orig = p[0];
+        apply_contrast(&mut p, 1.0);
+        assert!(
+            p[1].abs() < 1e-6 && p[2].abs() < 1e-6,
+            "grey gained colour: {p:?}"
+        );
+        assert!(
+            (p[0] - orig).abs() > 1e-3,
+            "tone curve stopped working: {orig} -> {}",
+            p[0]
+        );
+    }
+
+    #[test]
+    fn contrast_chroma_coupling_is_masked_at_extremes() {
+        // A near-black coloured pixel gets a smaller relative boost than a
+        // midtone one, because the coupling mask fades toward the endpoints.
+        let mut mid = rgb_to_oklab(0.5, 0.15, 0.05);
+        let mut dark = rgb_to_oklab(0.02, 0.006, 0.002);
+        let mid_before = chroma(mid);
+        let dark_before = chroma(dark);
+        apply_contrast(&mut mid, 1.0);
+        apply_contrast(&mut dark, 1.0);
+        let mid_gain = chroma(mid) / mid_before;
+        let dark_gain = chroma(dark) / dark_before;
+        assert!(mid_gain > dark_gain, "mid {mid_gain} vs dark {dark_gain}");
+    }
+
+    #[test]
     fn shadows_lift_darks_only() {
         let mut dark = [0.1f32, 0.0, 0.0];
         let mut mid = [0.6f32, 0.0, 0.0];
@@ -347,14 +508,16 @@ mod tests {
     }
 
     #[test]
-    fn whites_and_blacks_are_local() {
+    fn whites_hybrid_moves_whole_range_blacks_are_local() {
+        // Whites is a hybrid: the global term lifts the whole range...
         let mut high = [0.85f32, 0.0, 0.0];
         let mut low = [0.2f32, 0.0, 0.0];
         apply_whites(&mut high, 1.0);
         apply_whites(&mut low, 1.0);
         assert!(high[0] > 0.85, "high brightened: {}", high[0]);
-        assert!((low[0] - 0.2).abs() < 1e-6, "low untouched: {}", low[0]);
+        assert!(low[0] > 0.2, "low lifted by the global term: {}", low[0]);
 
+        // ...while Blacks stays local to the shadow zone.
         let mut dark = [0.1f32, 0.0, 0.0];
         let mut mid = [0.7f32, 0.0, 0.0];
         apply_blacks(&mut dark, -1.0);
@@ -371,19 +534,8 @@ mod tests {
     }
 
     #[test]
-    fn whites_blacks_preserve_endpoints() {
+    fn blacks_preserve_endpoints() {
         for amount in [-1.0f32, -0.5, 0.5, 1.0] {
-            let mut black = [0.0f32, 0.0, 0.0];
-            let mut white = [1.0f32, 0.0, 0.0];
-            apply_whites(&mut black, amount);
-            apply_whites(&mut white, amount);
-            assert!(black[0].abs() < 1e-6, "whites moved black: {}", black[0]);
-            assert!(
-                (white[0] - 1.0).abs() < 1e-6,
-                "whites moved white: {}",
-                white[0]
-            );
-
             let mut black = [0.0f32, 0.0, 0.0];
             let mut white = [1.0f32, 0.0, 0.0];
             apply_blacks(&mut black, amount);
@@ -398,11 +550,30 @@ mod tests {
     }
 
     #[test]
-    fn whites_negative_does_not_crush_white() {
-        // Before: the linear `room` dragged L=1 down to 0.5 at whites = -1.
+    fn whites_hybrid_moves_white_point_but_keeps_black() {
+        // Black stays pinned; the white point moves (global gain), unlike the
+        // old purely-local shape.
+        let mut black = [0.0f32, 0.0, 0.0];
+        apply_whites(&mut black, 1.0);
+        apply_whites(&mut black, -1.0);
+        assert!(black[0].abs() < 1e-6, "whites moved black: {}", black[0]);
+
+        let mut up = [1.0f32, 0.0, 0.0];
+        apply_whites(&mut up, 1.0);
+        assert!(up[0] > 1.0, "white point should rise: {}", up[0]);
+
+        let mut down = [1.0f32, 0.0, 0.0];
+        apply_whites(&mut down, -1.0);
+        assert!(down[0] < 1.0, "white point should drop: {}", down[0]);
+    }
+
+    #[test]
+    fn whites_negative_keeps_white_reasonable() {
+        // Global gain + local gamma darken the top end, but must not collapse it
+        // to mid grey: at whites = -1 the white point stays well above 0.6.
         let mut white = [1.0f32, 0.0, 0.0];
         apply_whites(&mut white, -1.0);
-        assert!((white[0] - 1.0).abs() < 1e-6, "white crushed: {}", white[0]);
+        assert!(white[0] > 0.6, "white crushed: {}", white[0]);
     }
 
     #[test]
@@ -435,8 +606,27 @@ mod tests {
         assert!((contrast_from_slider(0.0) - 0.0).abs() < 1e-6);
         assert!((contrast_from_slider(100.0) - 1.0).abs() < 1e-6);
         assert!((contrast_from_slider(-100.0) + 1.0).abs() < 1e-6);
-        // Square: 50 → 0.25
-        assert!((contrast_from_slider(50.0) - 0.25).abs() < 1e-6);
-        assert!((contrast_from_slider(-50.0) + 0.25).abs() < 1e-6);
+        // Linear: 50 -> 0.5
+        assert!((contrast_from_slider(50.0) - 0.5).abs() < 1e-6);
+        assert!((contrast_from_slider(-50.0) + 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn exposure_slider_curve_is_fine_near_zero() {
+        // Endpoints fixed, symmetric and monotonic.
+        assert!(exposure_from_slider(0.0).abs() < 1e-6);
+        assert!((exposure_from_slider(5.0) - 5.0).abs() < 1e-6);
+        assert!((exposure_from_slider(-5.0) + 5.0).abs() < 1e-6);
+        let mut prev = f32::NEG_INFINITY;
+        for i in -50..=50 {
+            let v = exposure_from_slider(i as f32 / 10.0);
+            assert!(v >= prev, "not monotonic at {i}: {v} < {prev}");
+            prev = v;
+        }
+        // Fine around 0: 1.0 on the slider is now well under 1 stop.
+        let e1 = exposure_from_slider(1.0);
+        assert!(e1 > 0.3 && e1 < 0.6, "1.0 slider = {e1} EV");
+        // The whole first half still moves slower than linear.
+        assert!(exposure_from_slider(2.5) < 2.5, "sub-linear at 2.5");
     }
 }
