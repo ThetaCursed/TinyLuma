@@ -228,6 +228,7 @@ impl TinyLumaApp {
         self.original_texture = None;
         self.image_path = None;
         self.is_dragging_split = false;
+        self.is_panning = false;
         self.zoom_scale = 1.0;
         self.pan_offset = egui::Vec2::ZERO;
         self.grain_map.clear();
@@ -585,6 +586,7 @@ impl TinyLumaApp {
         self.image_path = Some(path.clone());
         self.texture = None;
         self.original_texture = None;
+        self.is_panning = false;
         self.zoom_scale = 1.0;
         self.pan_offset = egui::Vec2::ZERO;
 

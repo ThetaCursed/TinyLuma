@@ -518,7 +518,13 @@ impl TinyLumaApp {
             // otherwise it would visually toggle only on the next frame.
             ui.ctx().request_repaint();
         } else if resp.clicked() {
-            if let Some(loaded_lut) = self.load_lut_cached(&lut.path) {
+            if is_selected {
+                // Second click on an already active LUT deselects it.
+                self.active_lut = None;
+                self.lut_lib.selected_lut_name = None;
+                self.lut_path = None;
+                changed = true;
+            } else if let Some(loaded_lut) = self.load_lut_cached(&lut.path) {
                 self.active_lut = Some(loaded_lut);
                 self.lut_lib.selected_lut_name = Some(lut.name.clone());
                 self.lut_path = Some(lut.path.clone());
@@ -603,6 +609,17 @@ fn lut_strength_slider(ui: &mut egui::Ui, name: &str, value: &mut f32) -> (bool,
                 .show_value(false)
                 .trailing_fill(true),
         );
+        // Double-click (left or right) resets the LUT strength to full (the value
+        // it gets when a LUT is selected). The Slider only senses drags, so we read
+        // the double-click from the pointer state and check the cursor is over it.
+        let double_clicked = ui.input(|i| {
+            i.pointer.button_double_clicked(egui::PointerButton::Primary)
+                || i.pointer.button_double_clicked(egui::PointerButton::Secondary)
+        });
+        if double_clicked && slider_resp.hovered() && *value != 100.0 {
+            *value = 100.0;
+            changed = true;
+        }
         if slider_resp.changed() {
             changed = true;
         }

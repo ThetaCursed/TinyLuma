@@ -534,6 +534,18 @@ pub(crate) fn labeled_slider(
                     .show_value(false)
                     .trailing_fill(true),
             );
+            // Double-click (left or right) on the slider resets it to its default
+            // value. The Slider only senses drags (not clicks), so `Response::clicked`
+            // never fires — we read the double-click straight from the pointer state
+            // and make sure the cursor is over this slider.
+            let double_clicked = ui.input(|i| {
+                i.pointer.button_double_clicked(egui::PointerButton::Primary)
+                    || i.pointer.button_double_clicked(egui::PointerButton::Secondary)
+            });
+            if double_clicked && slider_resp.hovered() && *value != default {
+                *value = default;
+                changed = true;
+            }
             if slider_resp.changed() {
                 changed = true;
             }

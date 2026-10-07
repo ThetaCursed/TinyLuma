@@ -72,6 +72,11 @@ pub(crate) struct TinyLumaApp {
     pub(crate) open_groups: [bool; 4],
     pub(crate) original_texture: Option<egui::TextureHandle>,
     pub(crate) is_dragging_split: bool,
+    /// True while a left-drag is panning the image (classified at drag start).
+    pub(crate) is_panning: bool,
+    /// Screen rect of the floating toolbar pill (set while drawing it). Used to avoid
+    /// replacing the cursor with the custom magnifier over the toolbar.
+    pub(crate) toolbar_rect: Option<egui::Rect>,
     pub(crate) active_lut: Option<Arc<Lut3D>>,
     pub(crate) lut_path: Option<PathBuf>,
     /// Cache of parsed LUTs keyed by path (so .cube is not read/parsed on
@@ -508,6 +513,8 @@ impl TinyLumaApp {
             filmstrip_needs_scroll: false,
             original_texture: None,
             is_dragging_split: false,
+            is_panning: false,
+            toolbar_rect: None,
             active_lut: None,
             lut_path: None,
             lut_cache: HashMap::new(),

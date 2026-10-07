@@ -690,39 +690,93 @@ impl TinyLumaApp {
                     let k = new_zoom / old_zoom;
                     // Keep the point under the cursor in place.
                     self.pan_offset = (anchor - center) - ((anchor - center) - self.pan_offset) * k;
-                    self.zoom_scale = new_zoom;
+                    self.set_zoom(new_zoom);
                 }
             }
         }
 
-        // --- PANNING (space + drag) ---
+        // --- HIT GEOMETRY (before input: classify drags/clicks) ---
+        let avail_size = viewport_rect.size();
+        let base_scale = (avail_size.x / tex_size.x).min(avail_size.y / tex_size.y);
+        let hit_rect = {
+            let display_size = tex_size * base_scale * self.zoom_scale;
+            let max_pan = max_pan_offset(display_size, avail_size);
+            let pan = egui::vec2(
+                self.pan_offset.x.clamp(-max_pan.x, max_pan.x),
+                self.pan_offset.y.clamp(-max_pan.y, max_pan.y),
+            );
+            egui::Rect::from_center_size(viewport_rect.center() + pan, display_size)
+        };
+        // Is the cursor over the image itself (not the letterbox)?
+        let over_image = hover_pos.map_or(false, |p| hit_rect.contains(p));
+        // Does the pointer sit on the before/after splitter handle?
+        let over_splitter = orig_tex_id.is_some()
+            && !self.show_save_dialog
+            && hover_pos.map_or(false, |p| {
+                viewport_rect.contains(p) && splitter_grab_zone(hit_rect, self.split_position, p)
+            });
+
+        // --- PANNING: left-drag anywhere (the splitter keeps priority) ---
         let space_held = ui.input(|i| i.key_down(egui::Key::Space));
-        if space_held {
-            if response.hovered() || response.dragged() {
-                ui.ctx().set_cursor_icon(if response.dragged() {
-                    egui::CursorIcon::Grabbing
-                } else {
-                    egui::CursorIcon::Grab
+        // Classify the gesture once, at the start of the drag.
+        if response.drag_started() {
+            let drag_origin = response.interact_pointer_pos().or(hover_pos);
+            let on_splitter = orig_tex_id.is_some()
+                && !self.show_save_dialog
+                && !space_held
+                && drag_origin.map_or(false, |p| {
+                    viewport_rect.contains(p)
+                        && splitter_grab_zone(hit_rect, self.split_position, p)
                 });
+            if on_splitter {
+                self.is_dragging_split = true;
+                self.is_panning = false;
+            } else {
+                self.is_panning = true;
             }
-            if response.dragged() {
-                self.pan_offset += response.drag_delta();
+        }
+        if response.drag_stopped() {
+            self.is_panning = false;
+        }
+        if response.dragged() && self.is_panning {
+            // Pan both axes; each is clamped to keep >= 30% of the image visible
+            // (see `max_pan_offset`). The cursor is drawn later (custom hand).
+            self.pan_offset += response.drag_delta();
+        }
+
+        // --- LEFT-CLICK: toggle "fit" <-> 1.5x zoom anchored at the cursor ---
+        // First click zooms 50% into the clicked area, the next one (while zoomed)
+        // returns the image to fit. The "fit" state is read from the transform, so
+        // manual wheel/keyboard zoom is reset the same way.
+        if over_image
+            && !space_held
+            && !self.show_save_dialog
+            && !over_splitter
+            && response.clicked()
+        {
+            let at_fit = (self.zoom_scale - 1.0).abs() < 0.001
+                && self.pan_offset.length_sq() < 0.25;
+            if at_fit {
+                const CLICK_ZOOM: f32 = 1.5;
+                let old_zoom = self.zoom_scale;
+                let new_zoom = CLICK_ZOOM.clamp(0.1, 5.0);
+                let center = viewport_rect.center();
+                let anchor = hover_pos.unwrap_or(center);
+                let k = new_zoom / old_zoom;
+                // Keep the point under the cursor in place.
+                self.pan_offset = (anchor - center) - ((anchor - center) - self.pan_offset) * k;
+                self.apply_zoom(new_zoom);
+            } else {
+                self.apply_zoom(1.0);
             }
         }
 
-        // --- GEOMETRY ---
-        let avail_size = viewport_rect.size();
-        let base_scale = (avail_size.x / tex_size.x).min(avail_size.y / tex_size.y);
+        // --- GEOMETRY (after input: re-clamp the pan and build the draw rect) ---
         let display_size = tex_size * base_scale * self.zoom_scale;
-
-        // Do not let the image move outside the viewport.
-        let max_pan = egui::vec2(
-            ((display_size.x - avail_size.x) / 2.0).max(0.0),
-            ((display_size.y - avail_size.y) / 2.0).max(0.0),
-        );
+        // Both axes may be dragged until at least 30% of the image is still visible.
+        let max_pan = max_pan_offset(display_size, avail_size);
         self.pan_offset.x = self.pan_offset.x.clamp(-max_pan.x, max_pan.x);
         self.pan_offset.y = self.pan_offset.y.clamp(-max_pan.y, max_pan.y);
-
         let rect =
             egui::Rect::from_center_size(viewport_rect.center() + self.pan_offset, display_size);
 
@@ -846,7 +900,7 @@ impl TinyLumaApp {
             }
 
             // 6. Splitter dragging (except saving and panning)
-            if !self.show_save_dialog && !space_held {
+            if !self.show_save_dialog && !space_held && !self.is_panning {
                 if hover_near && !pointer_down {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
                 }
@@ -872,6 +926,38 @@ impl TinyLumaApp {
             } else {
                 self.is_dragging_split = false;
             }
+        }
+
+        // Custom cursor over the photo. Windows has no OS cursors for zoom, and
+        // `Grab`/`Grabbing` map to the four-arrow SIZEALL (not a hand), so we hide the
+        // system cursor and draw a phosphor glyph under the pointer:
+        //   • pan drag   → closed hand;
+        //   • Space ready → open hand;
+        //   • otherwise   → magnifier "+" at fit / "−" when zoomed in.
+        // Skipped over the floating toolbar, otherwise its opaque pill would hide the
+        // glyph and leave the pointer invisible.
+        let over_toolbar = hover_pos.map_or(false, |p| {
+            self.toolbar_rect.map_or(false, |r| r.expand(2.0).contains(p))
+        });
+        let cursor_glyph = if over_toolbar || self.show_save_dialog {
+            None
+        } else if self.is_panning {
+            // Grabbing takes priority: the drag may leave the image/viewport.
+            Some(ph::HAND_GRABBING)
+        } else if space_held && pointer_over {
+            Some(ph::HAND)
+        } else if over_image && !over_splitter {
+            Some(if self.zoom_scale <= 1.0 {
+                ph::MAGNIFYING_GLASS_PLUS
+            } else {
+                ph::MAGNIFYING_GLASS_MINUS
+            })
+        } else {
+            None
+        };
+        if let (Some(glyph), Some(p)) = (cursor_glyph, hover_pos) {
+            ctx.set_cursor_icon(egui::CursorIcon::None);
+            draw_cursor_glyph(&painter, p, glyph);
         }
 
         // A single toolbar bar at the bottom of the photo: history and before/after on the left,
@@ -921,4 +1007,80 @@ fn window_button(
         },
     );
     r.clicked()
+}
+
+/// Maximum pan offset (per axis) for a given rendered image size.
+///
+/// Both axes use the same rule: the image may be dragged until at least 30% of
+/// its size on that axis is still inside the canvas. If the image is zoomed so far
+/// that 30% of it no longer fits into the viewport, we fall back to the hard clamp
+/// (the image edge cannot leave the viewport).
+fn max_pan_offset(display_size: egui::Vec2, avail_size: egui::Vec2) -> egui::Vec2 {
+    const MIN_VISIBLE_FRAC: f32 = 0.30;
+
+    let axis = |d: f32, a: f32| {
+        let hard = ((d - a) / 2.0).max(0.0);
+        // Pan at which exactly `MIN_VISIBLE_FRAC` of the image is still visible.
+        let visible = (a + d) / 2.0 - MIN_VISIBLE_FRAC * d;
+        hard.max(visible).max(0.0)
+    };
+
+    egui::vec2(
+        axis(display_size.x, avail_size.x),
+        axis(display_size.y, avail_size.y),
+    )
+}
+
+/// Draws a custom cursor glyph at `p` (screen space) with a thin dark halo in the
+/// app's palette, so it stays readable on both light and dark photos.
+fn draw_cursor_glyph(painter: &egui::Painter, p: egui::Pos2, glyph: &str) {
+    let font = egui::FontId::proportional(22.0);
+    const HALO: [(f32, f32); 8] = [
+        (-1.0, 0.0),
+        (1.0, 0.0),
+        (0.0, -1.0),
+        (0.0, 1.0),
+        (-0.7, -0.7),
+        (0.7, -0.7),
+        (-0.7, 0.7),
+        (0.7, 0.7),
+    ];
+    let halo = theme::with_alpha(theme::BG_DEEP, 165);
+    for (dx, dy) in HALO {
+        painter.text(
+            p + egui::vec2(dx, dy),
+            egui::Align2::CENTER_CENTER,
+            glyph,
+            font.clone(),
+            halo,
+        );
+    }
+    painter.text(
+        p + egui::vec2(1.4, 1.4),
+        egui::Align2::CENTER_CENTER,
+        glyph,
+        font.clone(),
+        theme::with_alpha(theme::BG_DEEP, 80),
+    );
+    painter.text(p, egui::Align2::CENTER_CENTER, glyph, font, theme::TEXT);
+}
+
+/// Whether `p` (screen space) is close enough to the before/after divider to grab
+/// it. Mirrors the grab zones that are used when drawing the splitter handle.
+fn splitter_grab_zone(rect: egui::Rect, split_position: f32, p: egui::Pos2) -> bool {
+    const EDGE_PX: f32 = 6.0; // how close to the edge counts as "handle at the edge"
+    const EDGE_GRAB: f32 = 26.0; // grab zone at the edge (wider — easy to catch)
+    const HANDLE_GRAB: f32 = 14.0; // grab zone of the handle in the middle
+
+    let split_x = rect.left() + rect.width() * split_position;
+    let at_left = split_x - rect.left() <= EDGE_PX;
+    let at_right = rect.right() - split_x <= EDGE_PX;
+    let at_edge = at_left || at_right;
+
+    let near_handle = (p.x - split_x).abs() < HANDLE_GRAB && rect.contains(p);
+    let near_edge = at_edge
+        && ((at_left && (p.x - rect.left()).abs() < EDGE_GRAB)
+            || (at_right && (p.x - rect.right()).abs() < EDGE_GRAB));
+
+    near_handle || near_edge
 }

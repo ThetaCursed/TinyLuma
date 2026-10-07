@@ -297,6 +297,34 @@ impl eframe::App for TinyLumaApp {
 }
 
 impl TinyLumaApp {
+    /// Sets a new zoom level without touching the pan. Used by wheel/pinch, where the
+    /// point under the cursor must stay put and the user's framing is preserved.
+    pub(crate) fn set_zoom(&mut self, new_zoom: f32) {
+        self.zoom_scale = new_zoom.clamp(0.1, 5.0);
+    }
+
+    /// Zoom via the +/- buttons, Fit, hotkeys or the image click toggle: zooming out
+    /// smoothly pulls the pan back toward the center, so the 30% overscroll fades out
+    /// as the image approaches "fit" instead of snapping there. At fit or below the
+    /// image is exactly centered. Zooming in keeps the position intact.
+    pub(crate) fn apply_zoom(&mut self, new_zoom: f32) {
+        let old_zoom = self.zoom_scale;
+        let new_zoom = new_zoom.clamp(0.1, 5.0);
+
+        // Only when zooming out: taper the pan to zero over the last stretch before
+        // fit (from FIT_TAPER down to 1.0x).
+        if new_zoom < old_zoom {
+            const FIT_TAPER: f32 = 1.5;
+            let f = ((new_zoom - 1.0) / (FIT_TAPER - 1.0)).clamp(0.0, 1.0);
+            self.pan_offset *= f;
+        }
+
+        self.zoom_scale = new_zoom;
+        if new_zoom <= 1.0 {
+            self.pan_offset = egui::Vec2::ZERO;
+        }
+    }
+
     /// Undo/redo and zoom hotkeys. They do not fire in a text field.
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         if ctx.wants_keyboard_input() {
@@ -339,15 +367,16 @@ impl TinyLumaApp {
         });
 
         if self.texture.is_some() {
+            let zoom = self.zoom_scale;
             if zoom_in {
-                self.zoom_scale = (self.zoom_scale * 1.25).clamp(0.1, 5.0);
+                self.apply_zoom(zoom * 1.25);
             }
             if zoom_out {
-                self.zoom_scale = (self.zoom_scale / 1.25).clamp(0.1, 5.0);
+                self.apply_zoom(zoom / 1.25);
             }
         }
         if zoom_reset {
-            self.zoom_scale = 1.0;
+            self.apply_zoom(1.0);
         }
 
         // --- BEFORE / AFTER split: `\` (as in Lightroom) toggles the

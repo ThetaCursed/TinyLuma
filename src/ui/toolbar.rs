@@ -104,6 +104,7 @@ impl TinyLumaApp {
 
                 let full = ui.available_rect_before_wrap();
                 let pill_rect = egui::Rect::from_min_size(full.min, egui::vec2(bar_w, bar_h));
+                self.toolbar_rect = Some(pill_rect);
                 super::widgets::plaque(ui.painter(), pill_rect);
 
                 let top = full.top() + PAD_Y;
@@ -237,7 +238,7 @@ impl TinyLumaApp {
                     .on_hover_text("Zoom out (Ctrl+-)")
                     .clicked()
                 {
-                    self.zoom_scale = (zoom / 1.25).clamp(0.1, 5.0);
+                    self.apply_zoom(zoom / 1.25);
                 }
 
                 let zoom_label = if (zoom - 1.0).abs() < 0.001 {
@@ -258,7 +259,7 @@ impl TinyLumaApp {
                     .on_hover_text("Reset zoom to fit (Ctrl+0)")
                     .clicked()
                 {
-                    self.zoom_scale = 1.0;
+                    self.apply_zoom(1.0);
                 }
 
                 if ui
@@ -269,7 +270,7 @@ impl TinyLumaApp {
                     .on_hover_text("Zoom in (Ctrl+=)")
                     .clicked()
                 {
-                    self.zoom_scale = (zoom * 1.25).clamp(0.1, 5.0);
+                    self.apply_zoom(zoom * 1.25);
                 }
             });
 
