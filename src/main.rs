@@ -10,6 +10,7 @@ mod lut;
 mod lut_library;
 mod pipeline;
 mod presets;
+mod retouch;
 mod session;
 mod settings;
 mod theme;

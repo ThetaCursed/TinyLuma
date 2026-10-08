@@ -19,6 +19,7 @@ use crate::ui::notification::Notification;
 pub(crate) mod export;
 pub(crate) mod image_io;
 mod processing;
+pub(crate) mod retouch;
 #[cfg(test)]
 mod perf;
 
@@ -51,6 +52,15 @@ pub(crate) struct TinyLumaApp {
     pub(crate) texture: Option<egui::TextureHandle>,
     pub(crate) color_dirty: bool,
     pub(crate) spatial_dirty: bool,
+    /// Retouch (spot heal) state: tool, layer, caches. See `app/retouch.rs`.
+    pub(crate) retouch: retouch::RetouchState,
+    /// A retouch change requires re-running the heal + the pipeline.
+    pub(crate) retouch_dirty: bool,
+    /// Screen rect of the retouch options bar (set while drawing it), so canvas
+    /// input does not heal through the sliders.
+    pub(crate) retouch_options_rect: Option<egui::Rect>,
+    /// Screen rect of the floating tools panel (heal + before/after).
+    pub(crate) tools_rect: Option<egui::Rect>,
     pub(crate) zoom_scale: f32,
     pub(crate) pan_offset: egui::Vec2, // image offset from the center (in screen pixels)
     /// Thumbnail cache for the filmstrip (keyed by file path).
@@ -159,6 +169,7 @@ impl TinyLumaApp {
             settings: self.settings,
             lut_path: self.lut_path.clone(),
             preset_name: self.current_preset_name(),
+            retouch: self.retouch.layer.clone(),
         }
     }
 
@@ -227,6 +238,14 @@ impl TinyLumaApp {
             }
         }
         self.combined_lut = None;
+        // Restore the retouch layer and invalidate the heal + render caches.
+        self.retouch.set_layer(snap.retouch);
+        self.retouch_dirty = true;
+        if let Some(path) = &self.image_path {
+            self.preview_cache.drop_render(path);
+            let layer = self.retouch.layer.clone();
+            self.session.save_retouch(path, layer);
+        }
         self.color_dirty = true;
         self.spatial_dirty = true;
         self.full_render_pending = true;
@@ -365,9 +384,14 @@ impl TinyLumaApp {
             } else {
                 self.session.load_settings(&path)
             };
+            let old_layer = if is_current {
+                self.retouch.layer.clone()
+            } else {
+                self.session.load_retouch(&path)
+            };
 
-            // A frame is considered "touched" if it has edits (not default or has a LUT).
-            let touched = old_settings != default || old_lut.is_some();
+            // A frame is "touched" if it has edits (not default, a LUT, or heal spots).
+            let touched = old_settings != default || old_lut.is_some() || !old_layer.is_empty();
             if only_untouched && touched {
                 continue;
             }
@@ -381,6 +405,7 @@ impl TinyLumaApp {
                 settings: old_settings,
                 lut_path: old_lut,
                 preset_name: old_preset,
+                retouch: old_layer,
             };
             // Put the "before" snapshot into this frame's history so that undo/redo
             // works even on frames the user has not switched to yet.
@@ -468,18 +493,7 @@ impl TinyLumaApp {
         lut_lib.favorites_path = Some(PathBuf::from("config/favorites.json"));
         lut_lib.load_favorites();
 
-        let (
-            saved_format,
-            saved_quality,
-            saved_input_dir,
-            saved_output_dir,
-            saved_split,
-            saved_open_groups,
-            saved_postfix,
-            saved_embed_metadata,
-            saved_lut_favorites_only,
-            saved_open_lut_categories,
-        ) = Self::load_save_settings();
+        let saved = Self::load_save_settings();
 
         Self {
             settings: FilterSettings::default(),
@@ -503,6 +517,17 @@ impl TinyLumaApp {
             texture: None,
             color_dirty: false,
             spatial_dirty: false,
+            retouch: {
+                // Start with the brush the user is comfortable with (persisted in
+                // the config), not the factory default.
+                let mut retouch = retouch::RetouchState::default();
+                retouch.brush.size = saved.brush_size;
+                retouch.brush.hardness = saved.brush_hardness;
+                retouch
+            },
+            retouch_dirty: false,
+            retouch_options_rect: None,
+            tools_rect: None,
             zoom_scale: 1.0,
             pan_offset: egui::Vec2::ZERO,
             thumbnails: HashMap::new(),
@@ -538,21 +563,31 @@ impl TinyLumaApp {
             last_render_time: Instant::now(),
             lut_lib,
             lut_search: String::new(),
-            lut_favorites_only: saved_lut_favorites_only,
-            open_lut_categories: saved_open_lut_categories,
+            lut_favorites_only: saved.lut_favorites_only,
+            open_lut_categories: saved.open_lut_categories,
             favorites_dirty: false,
             last_favorite_toggle: Instant::now(),
             save_settings_path: PathBuf::from("config/save_settings.json"),
             notifications: Vec::new(),
             show_save_dialog: false,
             show_close_confirm: false,
-            last_input_dir: saved_input_dir,
-            last_output_dir: saved_output_dir,
-            split_position: saved_split,
-            open_groups: saved_open_groups,
-            save_format: saved_format,
-            save_quality: saved_quality,
-            embed_png_metadata: saved_embed_metadata,
+            last_input_dir: saved
+                .last_input_dir
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_default(),
+            last_output_dir: saved
+                .last_output_dir
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_default(),
+            split_position: saved.split_position,
+            open_groups: saved.open_groups,
+            save_format: saved.format,
+            save_quality: saved.quality,
+            embed_png_metadata: saved.embed_png_metadata,
             preset_manager: PresetManager::new(),
             session: Session::new(),
             show_batch_progress: false,
@@ -563,7 +598,7 @@ impl TinyLumaApp {
             export_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             show_apply_all_dialog: false,
             batch_preset_selected_index: None,
-            batch_postfix: saved_postfix,
+            batch_postfix: saved.postfix,
             batch_use_current_settings: true,
             batch_apply_only_untouched: false,
         }

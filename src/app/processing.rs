@@ -14,6 +14,7 @@ use crate::pipeline::color::{ColorSettings, WhiteBalance, apply_chroma, gamut_ma
 use crate::pipeline::light::{
     LightSettings, apply_light, contrast_from_slider, exposure_from_slider, unit_from_slider,
 };
+use crate::retouch::RetouchLayer;
 use crate::settings::FilterSettings;
 
 /// Reference resolution for the detail group (matches the preview cap, 1200px).
@@ -712,10 +713,22 @@ impl TinyLumaApp {
         img: &RgbImage,
         settings: &FilterSettings,
         lut_path: &Option<PathBuf>,
+        layer: &RetouchLayer,
     ) -> Vec<u8> {
         let w = img.width() as usize;
         let h = img.height() as usize;
-        let mut color_buffer = img.as_raw().clone();
+
+        // ---- Retouch (heal) runs BEFORE everything else, on the raw base ----
+        let layered;
+        let src = if layer.is_empty() {
+            img
+        } else {
+            let mut healed = img.clone();
+            layer.apply_to(&mut healed);
+            layered = healed;
+            &layered
+        };
+        let mut color_buffer = src.as_raw().clone();
 
         // ---- Pass 1: color (through the baked LUT) ----
         if let Some(lut) = Self::bake_temp_lut(settings, lut_path) {
@@ -778,7 +791,7 @@ impl TinyLumaApp {
     }
 
     pub(crate) fn process_preview(&mut self, ctx: &egui::Context) {
-        let needs_reprocess = self.color_dirty || self.spatial_dirty;
+        let needs_reprocess = self.color_dirty || self.spatial_dirty || self.retouch_dirty;
         if !needs_reprocess && !self.full_render_pending {
             return;
         }
@@ -799,14 +812,39 @@ impl TinyLumaApp {
         }
         self.full_render_pending = false;
 
-        let base = match &self.preview_base {
-            Some(b) => b,
-            None => return,
-        };
+        if self.preview_base.is_none() {
+            return;
+        }
 
-        let w = base.width() as usize;
-        let h = base.height() as usize;
-        let base_raw = base.as_raw().to_vec();
+        // Heal the base BEFORE Pass 1. Both the retouch mode and the normal
+        // pipeline operate on this healed base.
+        let (w, h) = {
+            let base = self.preview_base.as_ref().unwrap();
+            (base.width() as usize, base.height() as usize)
+        };
+        self.retouch_dirty = false;
+
+        // Retouch mode: work and display at full resolution (long side ≤ 4096)
+        // so real pixel detail is visible. The layer is still non-destructive;
+        // the full-resolution buffers live only while the tool is active.
+        if self.retouch.active {
+            let path = self.image_path.clone();
+            self.retouch.ensure_full_base(path.as_deref());
+            self.retouch.ensure_full_healed();
+            if self.retouch.full_texture_dirty {
+                self.upload_full_retouch_textures(ctx);
+                self.retouch.full_texture_dirty = false;
+            }
+            self.color_dirty = false;
+            self.spatial_dirty = false;
+            self.color_buffer_valid = false;
+            return;
+        }
+
+        let base_raw = {
+            let base = self.preview_base.as_ref().unwrap();
+            self.retouch.healed_base(base).as_raw().to_vec()
+        };
 
         let needs_spatial = self.settings.texture != 0.0
             || self.settings.clarity != 0.0
@@ -1310,5 +1348,48 @@ mod tests {
                 t.elapsed().as_secs_f64() * 1000.0
             );
         }
+    }
+
+    /// A non-empty retouch layer must change the full render, and the change
+    /// must be confined to the spot's neighbourhood.
+    #[test]
+    fn render_full_image_applies_retouch_layer() {
+        use crate::retouch::{RetouchLayer, Spot, SpotKind};
+
+        let (w, h) = (96u32, 96u32);
+        let mut img = RgbImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let v = ((x as f32 / w as f32) * 200.0) as u8;
+                img.put_pixel(x, y, image::Rgb([v, v, v]));
+            }
+        }
+        for y in 44..52 {
+            for x in 44..52 {
+                img.put_pixel(x, y, image::Rgb([0, 0, 0]));
+            }
+        }
+
+        let mut layer = RetouchLayer::default();
+        layer.push(Spot {
+            center: [0.5, 0.5],
+            radius: 0.1,
+            hardness: 1.0,
+            opacity: 1.0,
+            kind: SpotKind::ProximityMatch,
+        });
+
+        let settings = FilterSettings::default();
+        let without = TinyLumaApp::render_full_image(&img, &settings, &None, &RetouchLayer::default());
+        let with = TinyLumaApp::render_full_image(&img, &settings, &None, &layer);
+
+        assert_ne!(without, with, "the layer must change the render");
+
+        // A far corner must stay byte-identical.
+        let far = (2 * 96 + 2) * 3;
+        assert_eq!(&without[far..far + 3], &with[far..far + 3]);
+        // The hole center must differ.
+        let center = (48 * 96 + 48) * 3;
+        assert_ne!(&without[center..center + 3], &with[center..center + 3]);
     }
 }

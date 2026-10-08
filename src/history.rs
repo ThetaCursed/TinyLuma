@@ -3,9 +3,10 @@
 
 use std::path::PathBuf;
 
+use crate::retouch::RetouchLayer;
 use crate::settings::FilterSettings;
 
-/// Snapshot of the entire editable state (sliders + selected LUT + preset).
+/// Snapshot of the entire editable state (sliders + selected LUT + preset + retouch).
 #[derive(Clone, PartialEq)]
 pub(crate) struct Snapshot {
     pub(crate) settings: FilterSettings,
@@ -13,6 +14,8 @@ pub(crate) struct Snapshot {
     pub(crate) lut_path: Option<PathBuf>,
     /// Name of the associated preset (for correct undo/redo of the selection).
     pub(crate) preset_name: Option<String>,
+    /// The retouch layer (heal spots). Cheap to clone — a few spots per image.
+    pub(crate) retouch: RetouchLayer,
 }
 
 /// Undo/redo stack over snapshots.

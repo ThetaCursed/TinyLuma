@@ -25,7 +25,7 @@ const PAD_X: f32 = 8.0;
 const PAD_Y: f32 = 5.0;
 /// Margin of the bar from the bottom edge of the viewport.
 const BOTTOM_MARGIN: f32 = 8.0;
-/// Margins of the before/after plaque from the canvas's top-left corner.
+/// Margins of the floating tools panel from the canvas's top-left corner.
 const EDGE_MARGIN: f32 = 12.0;
 const TOP_MARGIN: f32 = 12.0;
 
@@ -274,50 +274,64 @@ impl TinyLumaApp {
                 }
             });
 
-        // --- Before/after (split): plaque in the canvas's top-left corner ---
-        // Moved out of the bottom bar so history/index/zoom line up neatly.
-        // There is no separate "show original" button — the split plays its role.
-        let cmp_w = ICON_W + PAD_X * 2.0;
-        let cmp_h = row_h + PAD_Y * 2.0;
-        let cmp_pos = egui::pos2(
+        // --- Floating tools panel, top-left of the canvas ---
+        // Icon-only: the Spot Healing Brush (band-aids) and Before/After. Kept
+        // compact so it barely covers the photo; the tooltips carry the names.
+        const TOOL_BTN: f32 = 30.0;
+        let tools_pos = egui::pos2(
             viewport_rect.left() + EDGE_MARGIN,
             viewport_rect.top() + TOP_MARGIN,
         );
-        egui::Area::new(egui::Id::new("compare_overlay"))
+        egui::Area::new(egui::Id::new("tools_overlay"))
             .order(egui::Order::Middle)
-            .fixed_pos(cmp_pos)
+            .fixed_pos(tools_pos)
             .show(ctx, |ui| {
-                ui.set_min_width(cmp_w);
-                ui.set_max_width(cmp_w);
+                let frame = egui::Frame::none()
+                    .fill(theme::NAV_BG)
+                    .stroke(egui::Stroke::new(1.0, theme::NAV_BORDER))
+                    .rounding(egui::Rounding::same(theme::RADIUS_MD))
+                    .inner_margin(egui::Margin::same(6.0));
+                let inner = frame.show(ui, |ui| {
+                    ui.set_width(TOOL_BTN);
+                    ui.vertical(|ui| {
+                        // Spot Healing Brush — toggles the retouch tool.
+                        let mut heal_btn =
+                            egui::Button::new(egui::RichText::new(ph::BANDAIDS).size(17.0))
+                                .min_size(egui::vec2(TOOL_BTN, TOOL_BTN));
+                        if self.retouch.active {
+                            heal_btn = heal_btn.fill(theme::ACCENT);
+                        }
+                        if ui
+                            .add(heal_btn)
+                            .on_hover_text("Spot Healing Brush — paint over defects to heal them")
+                            .clicked()
+                        {
+                            self.retouch_toggle();
+                        }
 
-                let full = ui.available_rect_before_wrap();
-                let pill_rect = egui::Rect::from_min_size(full.min, egui::vec2(cmp_w, cmp_h));
-                super::widgets::plaque(ui.painter(), pill_rect);
+                        ui.add_space(4.0);
 
-                let top = full.top() + PAD_Y;
-                let split_rect = egui::Rect::from_min_size(
-                    egui::pos2(full.left() + PAD_X, top),
-                    egui::vec2(ICON_W, row_h),
-                );
-
-                let can_compare = self.original_texture.is_some();
-
-                let split_active = self.split_position > 0.0;
-                let split_resp = ui
-                    .put(
-                        split_rect,
-                        icon_button(
-                            ph::ARROWS_LEFT_RIGHT,
-                            15.0,
-                            can_compare,
-                            false,
-                        ),
-                    )
-                    .on_hover_text("Toggle before/after split");
-                if can_compare && split_resp.clicked() {
-                    self.split_position = if split_active { 0.0 } else { 0.5 };
-                    self.save_save_settings();
-                }
+                        // Before / After split.
+                        let can_compare = self.original_texture.is_some();
+                        let split_active = self.split_position > 0.0;
+                        let mut cmp_btn = egui::Button::new(
+                            egui::RichText::new(ph::ARROWS_LEFT_RIGHT).size(17.0),
+                        )
+                        .min_size(egui::vec2(TOOL_BTN, TOOL_BTN));
+                        if split_active {
+                            cmp_btn = cmp_btn.fill(theme::ACCENT);
+                        }
+                        if ui
+                            .add_enabled(can_compare, cmp_btn)
+                            .on_hover_text("Before / After split (\\)")
+                            .clicked()
+                        {
+                            self.split_position = if split_active { 0.0 } else { 0.5 };
+                            self.save_save_settings();
+                        }
+                    });
+                });
+                self.tools_rect = Some(inner.response.rect);
             });
     }
 }

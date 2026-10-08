@@ -671,6 +671,9 @@ impl TinyLumaApp {
         // painter_at clips drawing to the viewport bounds
         let painter = ui.painter_at(viewport_rect);
 
+        // Floating retouch options bar (sets `retouch_options_rect` for this frame).
+        self.show_retouch_options(ctx, viewport_rect);
+
         let hover_pos = ui.input(|i| i.pointer.hover_pos());
         let pointer_over = hover_pos.map_or(false, |p| viewport_rect.contains(p));
 
@@ -707,14 +710,22 @@ impl TinyLumaApp {
             );
             egui::Rect::from_center_size(viewport_rect.center() + pan, display_size)
         };
-        // Is the cursor over the image itself (not the letterbox)?
-        let over_image = hover_pos.map_or(false, |p| hit_rect.contains(p));
+        // Is the cursor over the image itself (inside the viewport, not the
+        // letterbox)? The rendered image can be zoomed/panned beyond the canvas,
+        // so `hit_rect` alone is not enough: pixels outside the viewport (over the
+        // side panels, the bottom buttons or a dialog) must not count as "over the
+        // image", otherwise the OS cursor gets hidden and the custom glyph is
+        // clipped away.
+        let over_image = pointer_over && hover_pos.map_or(false, |p| hit_rect.contains(p));
         // Does the pointer sit on the before/after splitter handle?
         let over_splitter = orig_tex_id.is_some()
             && !self.show_save_dialog
             && hover_pos.map_or(false, |p| {
                 viewport_rect.contains(p) && splitter_grab_zone(hit_rect, self.split_position, p)
             });
+
+        // --- RETOUCH: takes over the left button while the tool is active ---
+        let retouch_consumed = self.retouch_pointer(ui, hit_rect, hover_pos);
 
         // --- PANNING: left-drag anywhere (the splitter keeps priority) ---
         let space_held = ui.input(|i| i.key_down(egui::Key::Space));
@@ -730,6 +741,10 @@ impl TinyLumaApp {
                 });
             if on_splitter {
                 self.is_dragging_split = true;
+                self.is_panning = false;
+            } else if retouch_consumed {
+                // The retouch tool owns the left drag.
+                self.is_dragging_split = false;
                 self.is_panning = false;
             } else {
                 self.is_panning = true;
@@ -752,6 +767,7 @@ impl TinyLumaApp {
             && !space_held
             && !self.show_save_dialog
             && !over_splitter
+            && !retouch_consumed
             && response.clicked()
         {
             let at_fit = (self.zoom_scale - 1.0).abs() < 0.001
@@ -900,7 +916,7 @@ impl TinyLumaApp {
             }
 
             // 6. Splitter dragging (except saving and panning)
-            if !self.show_save_dialog && !space_held && !self.is_panning {
+            if !self.show_save_dialog && !space_held && !self.is_panning && !self.retouch.active {
                 if hover_near && !pointer_down {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
                 }
@@ -928,18 +944,51 @@ impl TinyLumaApp {
             }
         }
 
+        // Retouch painted-region indication (translucent accent blue). The heal
+        // itself only runs when the pointer is released.
+        self.draw_retouch_overlay(ctx, &painter, rect);
+
         // Custom cursor over the photo. Windows has no OS cursors for zoom, and
         // `Grab`/`Grabbing` map to the four-arrow SIZEALL (not a hand), so we hide the
         // system cursor and draw a phosphor glyph under the pointer:
         //   • pan drag   → closed hand;
         //   • Space ready → open hand;
         //   • otherwise   → magnifier "+" at fit / "−" when zoomed in.
-        // Skipped over the floating toolbar, otherwise its opaque pill would hide the
-        // glyph and leave the pointer invisible.
+        //
+        // The glyph is painted on its own top-most layer, clipped to the canvas.
+        // The floating tools panel / retouch bar and the modal dialogs live on
+        // higher egui layers than the canvas painter; a glyph painted on the
+        // canvas would end up *under* them while the OS cursor is hidden, leaving
+        // the pointer invisible.
+        let cursor_painter = ctx
+            .layer_painter(egui::LayerId::new(
+                egui::Order::Tooltip,
+                egui::Id::new("tiny_luma_custom_cursor"),
+            ))
+            .with_clip_rect(viewport_rect);
+
+        // Floating overlays drawn on top of the canvas: over them we must not
+        // replace the OS cursor (the widgets handle their own) and must not heal
+        // through them.
         let over_toolbar = hover_pos.map_or(false, |p| {
             self.toolbar_rect.map_or(false, |r| r.expand(2.0).contains(p))
         });
-        let cursor_glyph = if over_toolbar || self.show_save_dialog {
+        let over_options = hover_pos.map_or(false, |p| {
+            self.retouch_options_rect.map_or(false, |r| r.contains(p))
+        });
+        let over_tools_panel = hover_pos.map_or(false, |p| {
+            self.tools_rect.map_or(false, |r| r.contains(p))
+        });
+        let over_overlay = over_toolbar || over_options || over_tools_panel;
+
+        // A modal dialog owns the pointer: keep the normal cursor visible so the
+        // user can interact with it instead of hiding it under the custom glyph.
+        let modal_open = self.show_save_dialog
+            || self.show_close_confirm
+            || self.show_batch_progress
+            || self.show_apply_all_dialog;
+
+        let cursor_glyph = if modal_open || over_overlay {
             None
         } else if self.is_panning {
             // Grabbing takes priority: the drag may leave the image/viewport.
@@ -955,9 +1004,23 @@ impl TinyLumaApp {
         } else {
             None
         };
-        if let (Some(glyph), Some(p)) = (cursor_glyph, hover_pos) {
+
+        if self.retouch.active
+            && over_image
+            && !over_overlay
+            && !space_held
+            && !self.is_panning
+            && !modal_open
+        {
+            if let Some(p) = hover_pos {
+                let (ww, wh) = self.retouch_work_dims();
+                let norm_r = self.retouch.brush.radius_fraction(ww, wh);
+                let screen_r = norm_r * hit_rect.width().max(hit_rect.height());
+                self.draw_brush_cursor(ctx, &cursor_painter, p, screen_r);
+            }
+        } else if let (Some(glyph), Some(p)) = (cursor_glyph, hover_pos) {
             ctx.set_cursor_icon(egui::CursorIcon::None);
-            draw_cursor_glyph(&painter, p, glyph);
+            draw_cursor_glyph(&cursor_painter, p, glyph);
         }
 
         // A single toolbar bar at the bottom of the photo: history and before/after on the left,

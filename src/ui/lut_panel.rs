@@ -35,6 +35,11 @@ impl TinyLumaApp {
                 s.floating_allocated_width = super::SCROLL_RESERVE;
                 s.bar_outer_margin = 0.0;
 
+                // Retouch mode shows the unadjusted base — disable the LUT controls.
+                if self.retouch.active {
+                    ui.disable();
+                }
+
                 // ===== ACTIVE LUT — pinned at the bottom =====
                 // The library above scrolls, while the status and strength of the selected LUT
                 // are always visible. As on the left panel, we remove the footer's

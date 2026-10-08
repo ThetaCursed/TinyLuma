@@ -7,13 +7,13 @@ use image::{ExtendedColorType, ImageEncoder};
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
-use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
 
 use super::TinyLumaApp;
-use crate::settings::{default_open_groups, FilterSettings, SaveFormat, SaveSettings};
+use crate::retouch::RetouchLayer;
+use crate::settings::{FilterSettings, SaveFormat, SaveSettings};
 
 /// Background batch export event.
 pub(crate) enum ExportEvent {
@@ -34,7 +34,7 @@ pub(crate) enum ExportEvent {
 /// Batch export job. Fully owns its data, so it can be safely
 /// moved into a background thread (it holds no references to UI state).
 pub(crate) struct ExportJob {
-    pub(crate) items: Vec<(PathBuf, FilterSettings, Option<PathBuf>)>,
+    pub(crate) items: Vec<(PathBuf, FilterSettings, Option<PathBuf>, RetouchLayer)>,
     pub(crate) output_dir: PathBuf,
     pub(crate) format: SaveFormat,
     pub(crate) quality: u8,
@@ -65,7 +65,7 @@ pub(crate) fn run_export(job: ExportJob, tx: Sender<ExportEvent>, cancel: Arc<At
     let mut saved = 0usize;
     let mut errors = Vec::new();
 
-    for (i, (path, settings, lut_path)) in items.into_iter().enumerate() {
+    for (i, (path, settings, lut_path, layer)) in items.into_iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
             let _ = tx.send(ExportEvent::Done {
                 saved,
@@ -85,7 +85,7 @@ pub(crate) fn run_export(job: ExportJob, tx: Sender<ExportEvent>, cancel: Arc<At
                 let rgb = img.to_rgb8();
                 let (w, h) = rgb.dimensions();
                 // Full render of the original: color + spatial effects.
-                let raw = TinyLumaApp::render_full_image(&rgb, &settings, &lut_path);
+                let raw = TinyLumaApp::render_full_image(&rgb, &settings, &lut_path, &layer);
 
                 let stem = path.file_stem().unwrap_or_default().to_string_lossy();
                 let out_name = format!("{}{}.{}", stem, postfix, ext);
@@ -318,18 +318,9 @@ fn write_png_with_metadata(
 }
 
 impl TinyLumaApp {
-    pub(crate) fn load_save_settings() -> (
-        SaveFormat,
-        u8,
-        PathBuf,
-        PathBuf,
-        f32,
-        [bool; 4],
-        String,
-        bool,
-        bool,
-        BTreeSet<String>,
-    ) {
+    /// Loads the persisted config. A missing or corrupt file yields defaults, so
+    /// the caller never has to special-case the first run or a hand-edited JSON.
+    pub(crate) fn load_save_settings() -> SaveSettings {
         let path = PathBuf::from("config/save_settings.json");
         if let Ok(content) = std::fs::read_to_string(&path) {
             if let Ok(settings) = serde_json::from_str::<SaveSettings>(&content) {
@@ -339,42 +330,10 @@ impl TinyLumaApp {
                     settings.quality,
                     settings.split_position * 100.0
                 );
-                let input_dir = settings
-                    .last_input_dir
-                    .filter(|s| !s.is_empty())
-                    .map(PathBuf::from)
-                    .unwrap_or_default();
-                let output_dir = settings
-                    .last_output_dir
-                    .filter(|s| !s.is_empty())
-                    .map(PathBuf::from)
-                    .unwrap_or_default();
-                return (
-                    settings.format,
-                    settings.quality,
-                    input_dir,
-                    output_dir,
-                    settings.split_position,
-                    settings.open_groups,
-                    settings.postfix,
-                    settings.embed_png_metadata,
-                    settings.lut_favorites_only,
-                    settings.open_lut_categories,
-                );
+                return settings;
             }
         }
-        (
-            crate::settings::default_save_format(),
-            crate::settings::default_quality(),
-            PathBuf::new(),
-            PathBuf::new(),
-            crate::settings::default_split_position(),
-            default_open_groups(),
-            crate::settings::default_postfix(),
-            false,
-            false,
-            BTreeSet::new(),
-        )
+        SaveSettings::default()
     }
 
     // Save settings to JSON
@@ -392,6 +351,8 @@ impl TinyLumaApp {
             embed_png_metadata: self.embed_png_metadata,
             lut_favorites_only: self.lut_favorites_only,
             open_lut_categories: self.open_lut_categories.clone(),
+            brush_size: self.retouch.brush.size,
+            brush_hardness: self.retouch.brush.hardness,
         };
         if let Ok(json) = serde_json::to_string_pretty(&settings) {
             let _ = std::fs::write(&self.save_settings_path, json);
@@ -415,7 +376,7 @@ impl TinyLumaApp {
         let rgb = img.to_rgb8();
         let (w, h) = rgb.dimensions();
 
-        let raw = Self::render_full_image(&rgb, &self.settings, &self.lut_path);
+        let raw = Self::render_full_image(&rgb, &self.settings, &self.lut_path, &self.retouch.layer);
 
         // Carry over metadata from the original if it is a PNG and the option is enabled.
         let metadata = if format == SaveFormat::Png && self.embed_png_metadata {
@@ -429,7 +390,9 @@ impl TinyLumaApp {
 
     /// Collects the list of frames to export: only the modified ones
     /// (settings ≠ default or a LUT is selected). Used by the batch export.
-    pub(crate) fn collect_modified_items(&self) -> Vec<(PathBuf, FilterSettings, Option<PathBuf>)> {
+    pub(crate) fn collect_modified_items(
+        &self,
+    ) -> Vec<(PathBuf, FilterSettings, Option<PathBuf>, RetouchLayer)> {
         let default_settings = FilterSettings::default();
         self.session
             .image_list
@@ -442,10 +405,11 @@ impl TinyLumaApp {
                     .copied()
                     .unwrap_or(default_settings);
                 let lut_path = self.session.lut_map.get(path).and_then(|o| o.clone());
-                if settings == default_settings && lut_path.is_none() {
+                let layer = self.session.load_retouch(path);
+                if settings == default_settings && lut_path.is_none() && layer.is_empty() {
                     None
                 } else {
-                    Some((path.clone(), settings, lut_path))
+                    Some((path.clone(), settings, lut_path, layer))
                 }
             })
             .collect()

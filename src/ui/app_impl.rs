@@ -174,6 +174,8 @@ impl eframe::App for TinyLumaApp {
 
         // --- UNDO / REDO and ZOOM (hotkeys, before the frame snapshot) ---
         self.handle_shortcuts(ctx);
+        // Retouch hotkeys ([ / ] size, Shift+[ / Shift+] hardness, Esc).
+        self.handle_retouch_shortcuts(ctx);
 
         // Drain the finished thumbnails from the background thread (filmstrip)
         self.poll_thumbnails(ctx);

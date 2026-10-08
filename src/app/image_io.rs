@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use super::TinyLumaApp;
 use crate::history::History;
+use crate::retouch::RetouchLayer;
 use crate::session::Session;
 use crate::settings::FilterSettings;
 use crate::ui::notification::ToastKind;
@@ -203,6 +204,19 @@ impl PreviewCache {
         }
     }
 
+    /// Drop the ready render of a single frame (a retouch edit changes only it).
+    pub(crate) fn drop_render(&mut self, path: &Path) {
+        if let Some(entry) = self.map.get_mut(path) {
+            if entry.processed.is_some() {
+                let old = Self::entry_size(entry);
+                entry.processed = None;
+                entry.has_render = false;
+                let new = Self::entry_size(entry);
+                self.bytes = self.bytes.saturating_sub(old.saturating_sub(new));
+            }
+        }
+    }
+
     pub(crate) fn clear(&mut self) {
         self.map.clear();
         self.order.clear();
@@ -236,6 +250,15 @@ impl TinyLumaApp {
         self.drag_active = false;
         self.was_dragging = false;
         self.full_render_pending = false;
+        // The retouch tool/layer are tied to the frame.
+        self.retouch.set_layer(RetouchLayer::default());
+        self.retouch.active = false;
+        self.retouch.unload_full();
+        // Free the memoized heal regions (they are only useful while a frame is open).
+        self.retouch.spot_cache.clear();
+        self.retouch_dirty = false;
+        self.retouch_options_rect = None;
+        self.tools_rect = None;
         self.thumbnails.clear();
         self.preview_cache.clear();
         self.thumb_rx = None;
@@ -424,6 +447,9 @@ impl TinyLumaApp {
             // The undo/redo stack belongs to the frame — save it under the path.
             let hist = std::mem::replace(&mut self.history, History::new());
             self.session.history_map.insert(path.clone(), hist);
+            // The retouch layer is per image as well.
+            let layer = self.retouch.layer.clone();
+            self.session.save_retouch(path, layer);
         }
 
         // 2. Update the index
@@ -484,6 +510,12 @@ impl TinyLumaApp {
             .history_map
             .remove(path)
             .unwrap_or_else(History::new);
+        // Retouch layer of this frame. Force a re-render only while the tool is
+        // active (it needs to load the full-resolution working image for the new
+        // frame); otherwise keep the cached preview render.
+        let layer = self.session.load_retouch(path);
+        self.retouch.set_layer(layer);
+        self.retouch_dirty = self.retouch.active;
         self.drag_baseline = None;
         self.drag_preset_dirty = None;
         self.drag_is_default = None;
@@ -503,6 +535,7 @@ impl TinyLumaApp {
         self.session.lut_map.remove(&path);
         self.session.preset_map.remove(&path);
         self.session.history_map.remove(&path);
+        self.session.retouch_map.remove(&path);
         self.thumbnails.remove(&path);
         self.preview_cache.remove(&path);
 
@@ -581,7 +614,6 @@ impl TinyLumaApp {
         let rh_u = rh as usize;
 
         // --- 2. APPLICATION DATA UPDATE ---
-        let raw = resized_rgb.as_raw().clone();
         self.preview_base = Some(resized_rgb);
         self.image_path = Some(path.clone());
         self.texture = None;
@@ -589,6 +621,12 @@ impl TinyLumaApp {
         self.is_panning = false;
         self.zoom_scale = 1.0;
         self.pan_offset = egui::Vec2::ZERO;
+
+        // Heal the base before the pipeline (empty layer → byte-identical copy).
+        let raw = {
+            let base = self.preview_base.as_ref().unwrap();
+            self.retouch.healed_base(base).as_raw().to_vec()
+        };
 
         // --- 3. GRAIN GENERATION ---
         // The map is deterministic in size: reuse it if the size is the same.

@@ -43,6 +43,32 @@ pub(crate) struct SaveSettings {
     /// by default (as before), and any removed from the config are ignored.
     #[serde(default)]
     pub(crate) open_lut_categories: BTreeSet<String>,
+    /// Retouch brush size (working-image pixels). Remembered across runs so the
+    /// user starts the next session with the brush they are comfortable with.
+    #[serde(default = "default_brush_size")]
+    pub(crate) brush_size: f32,
+    /// Retouch brush hardness, `0..1`.
+    #[serde(default = "default_brush_hardness")]
+    pub(crate) brush_hardness: f32,
+}
+
+impl Default for SaveSettings {
+    fn default() -> Self {
+        Self {
+            format: default_save_format(),
+            quality: default_quality(),
+            last_input_dir: None,
+            last_output_dir: None,
+            split_position: default_split_position(),
+            open_groups: default_open_groups(),
+            postfix: default_postfix(),
+            embed_png_metadata: false,
+            lut_favorites_only: false,
+            open_lut_categories: BTreeSet::new(),
+            brush_size: default_brush_size(),
+            brush_hardness: default_brush_hardness(),
+        }
+    }
 }
 
 /// By default all left-panel groups are expanded.
@@ -68,6 +94,16 @@ pub(crate) fn default_split_position() -> f32 {
 /// Default batch-export postfix.
 pub(crate) fn default_postfix() -> String {
     "_edited".to_string()
+}
+
+/// Retouch brush defaults. `BrushSettings` is the single source of truth, so the
+/// config fallback can never drift from the tool's own default.
+pub(crate) fn default_brush_size() -> f32 {
+    crate::retouch::BrushSettings::default().size
+}
+
+pub(crate) fn default_brush_hardness() -> f32 {
+    crate::retouch::BrushSettings::default().hardness
 }
 
 /// All settings for a single image (the sliders).

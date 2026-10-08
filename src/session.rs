@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::history::History;
+use crate::retouch::RetouchLayer;
 use crate::settings::FilterSettings;
 
 /// A session: the image list plus per-file settings.
@@ -22,6 +23,9 @@ pub(crate) struct Session {
     /// A separate undo/redo stack per image: switching frames must not wipe the
     /// edit history of the neighboring frames.
     pub(crate) history_map: HashMap<PathBuf, History>,
+    /// Heal spots per image. The retouch layer is its own field (never a preset)
+    /// and is swapped together with the settings on a frame change.
+    pub(crate) retouch_map: HashMap<PathBuf, RetouchLayer>,
 }
 
 impl Session {
@@ -33,6 +37,7 @@ impl Session {
             lut_map: HashMap::new(),
             preset_map: HashMap::new(),
             history_map: HashMap::new(),
+            retouch_map: HashMap::new(),
         }
     }
 
@@ -61,6 +66,9 @@ impl Session {
     /// LUT is selected).
     pub(crate) fn is_modified(&self, path: &PathBuf) -> bool {
         let default = FilterSettings::default();
+        if self.retouch_map.get(path).is_some_and(|l| !l.is_empty()) {
+            return true;
+        }
         match self.settings_map.get(path) {
             Some(s) if s != &default => true,
             _ => self.lut_map.get(path).and_then(|o| o.as_ref()).is_some(),
@@ -87,5 +95,19 @@ impl Session {
         let lut = self.lut_map.get(path).and_then(|o| o.clone());
         let preset = self.preset_map.get(path).and_then(|o| o.clone());
         (settings, lut, preset)
+    }
+
+    /// Stores the heal layer of a frame.
+    pub(crate) fn save_retouch(&mut self, path: &PathBuf, layer: RetouchLayer) {
+        if layer.is_empty() {
+            self.retouch_map.remove(path);
+        } else {
+            self.retouch_map.insert(path.clone(), layer);
+        }
+    }
+
+    /// The heal layer of a frame (empty by default).
+    pub(crate) fn load_retouch(&self, path: &PathBuf) -> RetouchLayer {
+        self.retouch_map.get(path).cloned().unwrap_or_default()
     }
 }

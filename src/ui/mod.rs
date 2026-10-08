@@ -55,5 +55,6 @@ pub(crate) mod filmstrip;
 pub(crate) mod left_panel;
 pub(crate) mod lut_panel;
 pub(crate) mod notification;
+pub(crate) mod retouch_tool;
 pub(crate) mod toolbar;
 pub(crate) mod widgets;

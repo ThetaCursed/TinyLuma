@@ -41,6 +41,12 @@ impl TinyLumaApp {
                 s.floating_allocated_width = super::SCROLL_RESERVE;
                 s.bar_outer_margin = 0.0;
 
+                // Retouch mode shows the unadjusted base, so the adjustments are
+                // visually disabled (they still apply outside the tool).
+                if self.retouch.active {
+                    ui.disable();
+                }
+
                 // The line is drawn by the last settings group itself (at the bottom); a separate
                 // footer line would give a doubled divider before the button.
                 // We remove the footer's horizontal padding: otherwise the button of the already
