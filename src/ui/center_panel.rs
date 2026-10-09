@@ -4,6 +4,7 @@
 use super::filmstrip::{FILMSTRIP_PAD, THUMB_HEIGHT};
 use super::notification::ToastKind;
 use crate::app::TinyLumaApp;
+use crate::crop::NormRect;
 use crate::theme;
 use eframe::egui;
 use egui_phosphor::regular as ph;
@@ -34,7 +35,10 @@ impl TinyLumaApp {
 
                 // Grab the texture data BEFORE the nested closures (otherwise a borrow conflict)
                 let tex_id = self.texture.as_ref().unwrap().id();
-                let tex_size = self.texture.as_ref().unwrap().size_vec2();
+                let tex_size_full = self.texture.as_ref().unwrap().size_vec2();
+                // Crop is non-destructive: the canvas draws a UV sub-rect of
+                // the transformed texture, so all buffers keep their size.
+                let (tex_size, visible, orientation, angle) = self.crop_display_state(tex_size_full);
                 let orig_tex_id = self.original_texture.as_ref().map(|t| t.id());
                 let has_multi = self.session.total() > 1;
 
@@ -57,7 +61,21 @@ impl TinyLumaApp {
                     egui::Layout::top_down(egui::Align::LEFT),
                     |ui| {
                         ui.set_min_size(image_size);
-                        self.draw_image_viewport(ui, ctx, tex_id, tex_size, orig_tex_id);
+                        if self.crop.active {
+                            // The crop tool owns the canvas: full image + overlay.
+                            self.draw_crop_view(ui, ctx, tex_id, tex_size_full);
+                        } else {
+                            self.draw_image_viewport(
+                                ui,
+                                ctx,
+                                tex_id,
+                                tex_size,
+                                orig_tex_id,
+                                visible,
+                                orientation,
+                                angle,
+                            );
+                        }
                     },
                 );
 
@@ -661,6 +679,9 @@ impl TinyLumaApp {
         tex_id: egui::TextureId,
         tex_size: egui::Vec2,
         orig_tex_id: Option<egui::TextureId>,
+        visible: NormRect,
+        orientation: crate::crop::Orientation,
+        angle: f32,
     ) {
         let viewport_rect = ui.available_rect_before_wrap();
         let response = ui.interact(
@@ -820,9 +841,17 @@ impl TinyLumaApp {
             }
         }
 
-        // 1. Processed image (AFTER)
-        let full_uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-        painter.image(tex_id, rect, full_uv, egui::Color32::WHITE);
+        // 1. Processed image (AFTER) — orientation + straighten via a GPU mesh.
+        super::crop_tool::draw_transformed(
+            &painter,
+            tex_id,
+            rect,
+            visible,
+            orientation,
+            angle,
+            self.crop_image_ratio(),
+            Some(rect),
+        );
 
         // 2. BEFORE/AFTER split: the original is drawn to the left of the divider.
         //    `\` (or the toolbar button) toggles the split on and off.
@@ -838,11 +867,18 @@ impl TinyLumaApp {
             if self.split_position > 0.0 {
                 let left_rect =
                     egui::Rect::from_min_max(rect.min, egui::pos2(split_x, rect.bottom()));
-                let uv_rect = egui::Rect::from_min_max(
-                    egui::pos2(0.0, 0.0),
-                    egui::pos2(self.split_position, 1.0),
+                // Draw the original with the SAME transform as the after side, then
+                // clip it to the left portion, so both halves stay aligned.
+                super::crop_tool::draw_transformed(
+                    &painter,
+                    orig_id,
+                    rect,
+                    visible,
+                    orientation,
+                    angle,
+                    self.crop_image_ratio(),
+                    Some(left_rect),
                 );
-                painter.image(orig_id, left_rect, uv_rect, egui::Color32::WHITE);
 
                 // BEFORE badge on the before side — kept for clarity so it is
                 // obvious which side is which. Drawn only when it fits without
@@ -1078,7 +1114,7 @@ fn window_button(
 /// its size on that axis is still inside the canvas. If the image is zoomed so far
 /// that 30% of it no longer fits into the viewport, we fall back to the hard clamp
 /// (the image edge cannot leave the viewport).
-fn max_pan_offset(display_size: egui::Vec2, avail_size: egui::Vec2) -> egui::Vec2 {
+pub(crate) fn max_pan_offset(display_size: egui::Vec2, avail_size: egui::Vec2) -> egui::Vec2 {
     const MIN_VISIBLE_FRAC: f32 = 0.30;
 
     let axis = |d: f32, a: f32| {

@@ -5,6 +5,7 @@
 
 mod app;
 mod color;
+mod crop;
 mod history;
 mod lut;
 mod lut_library;

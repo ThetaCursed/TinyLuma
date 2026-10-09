@@ -176,6 +176,14 @@ impl eframe::App for TinyLumaApp {
         self.handle_shortcuts(ctx);
         // Retouch hotkeys ([ / ] size, Shift+[ / Shift+] hardness, Esc).
         self.handle_retouch_shortcuts(ctx);
+        // Esc leaves the crop tool; Enter is the keyboard shortcut for "Done".
+        if self.crop.active && !ctx.wants_keyboard_input() {
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.crop_toggle();
+            } else if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+                self.crop_toggle();
+            }
+        }
 
         // Drain the finished thumbnails from the background thread (filmstrip)
         self.poll_thumbnails(ctx);
@@ -285,6 +293,9 @@ impl eframe::App for TinyLumaApp {
 
         // Central panel with the image
         self.show_center_panel(ctx);
+
+        // Crop: commit one history entry per change (drag gesture or preset).
+        self.commit_crop_history();
 
         // Modal windows (save, batch)
         self.show_dialogs(ctx);

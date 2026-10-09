@@ -50,6 +50,7 @@ pub(crate) const FEEDBACK_URL: &str = "https://forms.gle/W2iT49f5ikqdEqQ28";
 
 pub(crate) mod app_impl;
 pub(crate) mod center_panel;
+pub(crate) mod crop_tool;
 pub(crate) mod dialogs;
 pub(crate) mod filmstrip;
 pub(crate) mod left_panel;

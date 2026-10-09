@@ -274,10 +274,13 @@ impl TinyLumaApp {
                 }
             });
 
-        // --- Floating tools panel, top-left of the canvas ---
-        // Icon-only: the Spot Healing Brush (band-aids) and Before/After. Kept
-        // compact so it barely covers the photo; the tooltips carry the names.
-        const TOOL_BTN: f32 = 30.0;
+        // --- Floating tool selector, top-left of the canvas ---
+        // A vertical capsule (stadium) holding two icon toggles: the Spot Healing
+        // Brush and Before/After. The buttons have no plaque of their own — only a
+        // round highlight when a tool is active — so the block reads as one
+        // capsule instead of a stack of keycaps.
+        const TOOL_BTN: f32 = 28.0;
+        const TOOL_PAD: f32 = 4.0;
         let tools_pos = egui::pos2(
             viewport_rect.left() + EDGE_MARGIN,
             viewport_rect.top() + TOP_MARGIN,
@@ -286,45 +289,50 @@ impl TinyLumaApp {
             .order(egui::Order::Middle)
             .fixed_pos(tools_pos)
             .show(ctx, |ui| {
+                let capsule_w = TOOL_BTN + TOOL_PAD * 2.0;
                 let frame = egui::Frame::none()
                     .fill(theme::NAV_BG)
                     .stroke(egui::Stroke::new(1.0, theme::NAV_BORDER))
-                    .rounding(egui::Rounding::same(theme::RADIUS_MD))
-                    .inner_margin(egui::Margin::same(6.0));
+                    .rounding(egui::Rounding::same(capsule_w * 0.5))
+                    .inner_margin(egui::Margin::same(TOOL_PAD));
                 let inner = frame.show(ui, |ui| {
                     ui.set_width(TOOL_BTN);
+                    ui.spacing_mut().item_spacing.y = 2.0;
                     ui.vertical(|ui| {
-                        // Spot Healing Brush — toggles the retouch tool.
-                        let mut heal_btn =
-                            egui::Button::new(egui::RichText::new(ph::BANDAIDS).size(17.0))
-                                .min_size(egui::vec2(TOOL_BTN, TOOL_BTN));
-                        if self.retouch.active {
-                            heal_btn = heal_btn.fill(theme::ACCENT);
-                        }
-                        if ui
-                            .add(heal_btn)
-                            .on_hover_text("Spot Healing Brush — paint over defects to heal them")
+                        // Crop tool.
+                        if tool_icon_button(ui, ph::CROP, TOOL_BTN, self.crop.active, true)
+                            .on_hover_text("Crop")
                             .clicked()
+                        {
+                            self.crop_toggle();
+                        }
+
+                        // Spot Healing Brush — toggles the retouch tool.
+                        if tool_icon_button(
+                            ui,
+                            ph::BANDAIDS,
+                            TOOL_BTN,
+                            self.retouch.active,
+                            true,
+                        )
+                        .on_hover_text("Spot Healing Brush — paint over defects to heal them")
+                        .clicked()
                         {
                             self.retouch_toggle();
                         }
 
-                        ui.add_space(4.0);
-
                         // Before / After split.
                         let can_compare = self.original_texture.is_some();
                         let split_active = self.split_position > 0.0;
-                        let mut cmp_btn = egui::Button::new(
-                            egui::RichText::new(ph::ARROWS_LEFT_RIGHT).size(17.0),
+                        if tool_icon_button(
+                            ui,
+                            ph::ARROWS_LEFT_RIGHT,
+                            TOOL_BTN,
+                            split_active,
+                            can_compare,
                         )
-                        .min_size(egui::vec2(TOOL_BTN, TOOL_BTN));
-                        if split_active {
-                            cmp_btn = cmp_btn.fill(theme::ACCENT);
-                        }
-                        if ui
-                            .add_enabled(can_compare, cmp_btn)
-                            .on_hover_text("Before / After split (\\)")
-                            .clicked()
+                        .on_hover_text("Before / After split (\\)")
+                        .clicked()
                         {
                             self.split_position = if split_active { 0.0 } else { 0.5 };
                             self.save_save_settings();
@@ -334,6 +342,49 @@ impl TinyLumaApp {
                 self.tools_rect = Some(inner.response.rect);
             });
     }
+}
+
+/// Icon toggle inside the floating tool capsule. No button frame: an active
+/// tool is marked with a round accent fill, hover with a subtle round fill, so
+/// the buttons never read as keycaps.
+fn tool_icon_button(
+    ui: &mut egui::Ui,
+    icon: &str,
+    size: f32,
+    active: bool,
+    enabled: bool,
+) -> egui::Response {
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(size, size), sense);
+
+    let painter = ui.painter();
+    let center = rect.center();
+    let r = (size * 0.5 - 1.0).max(2.0);
+    if active {
+        painter.circle_filled(center, r, theme::ACCENT);
+    } else if enabled && resp.hovered() {
+        painter.circle_filled(center, r, theme::BG_ELEVATED);
+    }
+
+    let color = if !enabled {
+        theme::TEXT_DISABLED
+    } else if active {
+        egui::Color32::WHITE
+    } else {
+        theme::TEXT
+    };
+    painter.text(
+        center,
+        egui::Align2::CENTER_CENTER,
+        icon,
+        egui::FontId::proportional(16.0),
+        color,
+    );
+    resp
 }
 
 /// Vertical divider line inside the bar.

@@ -19,6 +19,7 @@ use crate::ui::notification::Notification;
 pub(crate) mod export;
 pub(crate) mod image_io;
 mod processing;
+pub(crate) mod crop;
 pub(crate) mod retouch;
 #[cfg(test)]
 mod perf;
@@ -54,11 +55,15 @@ pub(crate) struct TinyLumaApp {
     pub(crate) spatial_dirty: bool,
     /// Retouch (spot heal) state: tool, layer, caches. See `app/retouch.rs`.
     pub(crate) retouch: retouch::RetouchState,
+    /// Crop state: value + tool. See `app/crop.rs`.
+    pub(crate) crop: crop::CropState,
     /// A retouch change requires re-running the heal + the pipeline.
     pub(crate) retouch_dirty: bool,
     /// Screen rect of the retouch options bar (set while drawing it), so canvas
     /// input does not heal through the sliders.
     pub(crate) retouch_options_rect: Option<egui::Rect>,
+    /// Screen rect of the crop options bar (set while drawing it).
+    pub(crate) crop_options_rect: Option<egui::Rect>,
     /// Screen rect of the floating tools panel (heal + before/after).
     pub(crate) tools_rect: Option<egui::Rect>,
     pub(crate) zoom_scale: f32,
@@ -170,6 +175,7 @@ impl TinyLumaApp {
             lut_path: self.lut_path.clone(),
             preset_name: self.current_preset_name(),
             retouch: self.retouch.layer.clone(),
+            crop: self.crop.crop,
         }
     }
 
@@ -241,10 +247,26 @@ impl TinyLumaApp {
         // Restore the retouch layer and invalidate the heal + render caches.
         self.retouch.set_layer(snap.retouch);
         self.retouch_dirty = true;
+        // Restore the crop (display-only, no re-render needed). Any in-progress
+        // crop gesture is dropped so it cannot overwrite the restored value, and
+        // `committed` follows so the frame-end commit does not re-record it.
+        self.crop.crop = snap.crop;
+        self.crop.dragging = false;
+        self.crop.drag = None;
+        self.crop.committed = self.crop.crop;
+        // After an undo/redo the session keeps going from the restored value:
+        // the next crop change starts a new single-entry operation.
+        self.crop.session_baseline = if self.crop.active {
+            Some(self.crop.crop)
+        } else {
+            None
+        };
+        self.crop.angle_base = None;
         if let Some(path) = &self.image_path {
             self.preview_cache.drop_render(path);
             let layer = self.retouch.layer.clone();
             self.session.save_retouch(path, layer);
+            self.session.save_crop(path, self.crop.crop);
         }
         self.color_dirty = true;
         self.spatial_dirty = true;
@@ -406,6 +428,7 @@ impl TinyLumaApp {
                 lut_path: old_lut,
                 preset_name: old_preset,
                 retouch: old_layer,
+                crop: self.session.load_crop(&path),
             };
             // Put the "before" snapshot into this frame's history so that undo/redo
             // works even on frames the user has not switched to yet.
@@ -526,7 +549,9 @@ impl TinyLumaApp {
                 retouch
             },
             retouch_dirty: false,
+            crop: crop::CropState::default(),
             retouch_options_rect: None,
+            crop_options_rect: None,
             tools_rect: None,
             zoom_scale: 1.0,
             pan_offset: egui::Vec2::ZERO,

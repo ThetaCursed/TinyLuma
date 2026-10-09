@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::history::History;
+use crate::crop::Crop;
 use crate::retouch::RetouchLayer;
 use crate::settings::FilterSettings;
 
@@ -26,6 +27,9 @@ pub(crate) struct Session {
     /// Heal spots per image. The retouch layer is its own field (never a preset)
     /// and is swapped together with the settings on a frame change.
     pub(crate) retouch_map: HashMap<PathBuf, RetouchLayer>,
+    /// Crop per image. Stored separately from the settings (a crop is not a
+    /// slider preset) and swapped on a frame change.
+    pub(crate) crop_map: HashMap<PathBuf, Crop>,
 }
 
 impl Session {
@@ -38,6 +42,7 @@ impl Session {
             preset_map: HashMap::new(),
             history_map: HashMap::new(),
             retouch_map: HashMap::new(),
+            crop_map: HashMap::new(),
         }
     }
 
@@ -67,6 +72,9 @@ impl Session {
     pub(crate) fn is_modified(&self, path: &PathBuf) -> bool {
         let default = FilterSettings::default();
         if self.retouch_map.get(path).is_some_and(|l| !l.is_empty()) {
+            return true;
+        }
+        if self.crop_map.get(path).is_some_and(|c| !c.is_identity()) {
             return true;
         }
         match self.settings_map.get(path) {
@@ -109,5 +117,19 @@ impl Session {
     /// The heal layer of a frame (empty by default).
     pub(crate) fn load_retouch(&self, path: &PathBuf) -> RetouchLayer {
         self.retouch_map.get(path).cloned().unwrap_or_default()
+    }
+
+    /// Stores the crop of a frame.
+    pub(crate) fn save_crop(&mut self, path: &PathBuf, crop: Crop) {
+        if crop.is_identity() {
+            self.crop_map.remove(path);
+        } else {
+            self.crop_map.insert(path.clone(), crop);
+        }
+    }
+
+    /// The crop of a frame (identity by default).
+    pub(crate) fn load_crop(&self, path: &PathBuf) -> Crop {
+        self.crop_map.get(path).copied().unwrap_or_default()
     }
 }

@@ -1065,7 +1065,14 @@ impl TinyLumaApp {
             None => return,
         };
 
-        let color_image = egui::ColorImage::from_rgb([w, h], &self.processed_pixels);
+        // The texture stays raw: orientation and straighten are drawn on the GPU
+        // (a rotated quad mesh), so changing the angle is free and smooth.
+        let proc = if self.processed_pixels.len() == w * h * 3 {
+            &self.processed_pixels
+        } else {
+            self.preview_base.as_ref().unwrap().as_raw()
+        };
+        let color_image = egui::ColorImage::from_rgb([w, h], proc);
         if let Some(tex) = &mut self.texture {
             tex.set(color_image, egui::TextureOptions::LINEAR);
         } else {

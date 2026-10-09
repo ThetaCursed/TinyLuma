@@ -277,6 +277,8 @@ impl TinyLumaApp {
         if self.retouch.stroke_active {
             self.retouch_commit_stroke();
         }
+        // Crop and retouch both own the canvas: leaving retouch is implicit.
+        self.crop.active = false;
         self.retouch.active = !self.retouch.active;
         self.retouch.stroke_active = false;
         self.retouch.pending_path.clear();

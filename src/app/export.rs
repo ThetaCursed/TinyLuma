@@ -12,6 +12,7 @@ use std::sync::mpsc::Sender;
 use std::sync::Arc;
 
 use super::TinyLumaApp;
+use crate::crop::Crop;
 use crate::retouch::RetouchLayer;
 use crate::settings::{FilterSettings, SaveFormat, SaveSettings};
 
@@ -34,7 +35,7 @@ pub(crate) enum ExportEvent {
 /// Batch export job. Fully owns its data, so it can be safely
 /// moved into a background thread (it holds no references to UI state).
 pub(crate) struct ExportJob {
-    pub(crate) items: Vec<(PathBuf, FilterSettings, Option<PathBuf>, RetouchLayer)>,
+    pub(crate) items: Vec<(PathBuf, FilterSettings, Option<PathBuf>, RetouchLayer, Crop)>,
     pub(crate) output_dir: PathBuf,
     pub(crate) format: SaveFormat,
     pub(crate) quality: u8,
@@ -65,7 +66,7 @@ pub(crate) fn run_export(job: ExportJob, tx: Sender<ExportEvent>, cancel: Arc<At
     let mut saved = 0usize;
     let mut errors = Vec::new();
 
-    for (i, (path, settings, lut_path, layer)) in items.into_iter().enumerate() {
+    for (i, (path, settings, lut_path, layer, crop)) in items.into_iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
             let _ = tx.send(ExportEvent::Done {
                 saved,
@@ -86,6 +87,10 @@ pub(crate) fn run_export(job: ExportJob, tx: Sender<ExportEvent>, cancel: Arc<At
                 let (w, h) = rgb.dimensions();
                 // Full render of the original: color + spatial effects.
                 let raw = TinyLumaApp::render_full_image(&rgb, &settings, &lut_path, &layer);
+                // Orientation, straighten, then crop (the last steps).
+                let (raw, w, h) = crop.orientation.apply_rgb(&raw, w, h);
+                let (raw, w, h) = crate::crop::pixel::rotate_rgb(&raw, w, h, crop.angle);
+                let (raw, w, h) = crate::crop::pixel::crop_rgb(&raw, w, h, crop.rect);
 
                 let stem = path.file_stem().unwrap_or_default().to_string_lossy();
                 let out_name = format!("{}{}.{}", stem, postfix, ext);
@@ -377,6 +382,10 @@ impl TinyLumaApp {
         let (w, h) = rgb.dimensions();
 
         let raw = Self::render_full_image(&rgb, &self.settings, &self.lut_path, &self.retouch.layer);
+        // Orientation, then straighten, then crop (the last, non-destructive steps).
+        let (raw, w, h) = self.crop.crop.orientation.apply_rgb(&raw, w, h);
+        let (raw, w, h) = crate::crop::pixel::rotate_rgb(&raw, w, h, self.crop.crop.angle);
+        let (raw, out_w, out_h) = crate::crop::pixel::crop_rgb(&raw, w, h, self.crop.crop.rect);
 
         // Carry over metadata from the original if it is a PNG and the option is enabled.
         let metadata = if format == SaveFormat::Png && self.embed_png_metadata {
@@ -385,14 +394,14 @@ impl TinyLumaApp {
             Vec::new()
         };
 
-        write_image_file(save_path, format, quality, &raw, w, h, &metadata)
+        write_image_file(save_path, format, quality, &raw, out_w, out_h, &metadata)
     }
 
     /// Collects the list of frames to export: only the modified ones
     /// (settings ≠ default or a LUT is selected). Used by the batch export.
     pub(crate) fn collect_modified_items(
         &self,
-    ) -> Vec<(PathBuf, FilterSettings, Option<PathBuf>, RetouchLayer)> {
+    ) -> Vec<(PathBuf, FilterSettings, Option<PathBuf>, RetouchLayer, Crop)> {
         let default_settings = FilterSettings::default();
         self.session
             .image_list
@@ -406,10 +415,15 @@ impl TinyLumaApp {
                     .unwrap_or(default_settings);
                 let lut_path = self.session.lut_map.get(path).and_then(|o| o.clone());
                 let layer = self.session.load_retouch(path);
-                if settings == default_settings && lut_path.is_none() && layer.is_empty() {
+                let crop = self.session.load_crop(path);
+                if settings == default_settings
+                    && lut_path.is_none()
+                    && layer.is_empty()
+                    && crop.is_identity()
+                {
                     None
                 } else {
-                    Some((path.clone(), settings, lut_path, layer))
+                    Some((path.clone(), settings, lut_path, layer, crop))
                 }
             })
             .collect()

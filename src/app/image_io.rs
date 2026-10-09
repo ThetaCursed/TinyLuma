@@ -254,6 +254,13 @@ impl TinyLumaApp {
         self.retouch.set_layer(RetouchLayer::default());
         self.retouch.active = false;
         self.retouch.unload_full();
+        self.crop.crop.reset();
+        self.crop.active = false;
+        self.crop.dragging = false;
+        self.crop.drag = None;
+        self.crop.committed = self.crop.crop;
+        self.crop.session_baseline = None;
+        self.crop.angle_base = None;
         // Free the memoized heal regions (they are only useful while a frame is open).
         self.retouch.spot_cache.clear();
         self.retouch_dirty = false;
@@ -450,6 +457,7 @@ impl TinyLumaApp {
             // The retouch layer is per image as well.
             let layer = self.retouch.layer.clone();
             self.session.save_retouch(path, layer);
+            self.session.save_crop(path, self.crop.crop);
         }
 
         // 2. Update the index
@@ -516,6 +524,17 @@ impl TinyLumaApp {
         let layer = self.session.load_retouch(path);
         self.retouch.set_layer(layer);
         self.retouch_dirty = self.retouch.active;
+        // Crop of this frame (non-destructive — no re-render needed).
+        self.crop.crop = self.session.load_crop(path);
+        self.crop.dragging = false;
+        self.crop.drag = None;
+        self.crop.committed = self.crop.crop;
+        self.crop.session_baseline = if self.crop.active {
+            Some(self.crop.crop)
+        } else {
+            None
+        };
+        self.crop.angle_base = None;
         self.drag_baseline = None;
         self.drag_preset_dirty = None;
         self.drag_is_default = None;
@@ -536,6 +555,7 @@ impl TinyLumaApp {
         self.session.preset_map.remove(&path);
         self.session.history_map.remove(&path);
         self.session.retouch_map.remove(&path);
+        self.session.crop_map.remove(&path);
         self.thumbnails.remove(&path);
         self.preview_cache.remove(&path);
 
