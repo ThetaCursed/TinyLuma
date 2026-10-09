@@ -94,6 +94,32 @@ pub const DANGER: Color32 = Color32::from_rgb(255, 69, 58);
 pub const STAR: Color32 = Color32::from_rgb(255, 214, 10);
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Colour-axis slider tracks
+// ─────────────────────────────────────────────────────────────────────────────
+// Gradient rails for bipolar colour controls. These are the only *coloured*
+// UI elements outside the accent: the colour carries the semantics (cool↔warm,
+// green↔magenta), so they read as an intentional exception rather than a style
+// break. Muted tones that sit calmly on `BG_SURFACE`.
+
+/// Temperature track: cool blue → cyan → neutral grey → warm yellow → orange.
+pub const TEMP_TRACK: [Color32; 5] = [
+    Color32::from_rgb(45, 74, 116),
+    Color32::from_rgb(63, 148, 182),
+    Color32::from_rgb(138, 138, 138),
+    Color32::from_rgb(199, 197, 73),
+    Color32::from_rgb(199, 134, 60),
+];
+
+/// Tint track: green → neutral grey → magenta.
+pub const TINT_TRACK: [Color32; 5] = [
+    Color32::from_rgb(68, 141, 65),
+    Color32::from_rgb(89, 212, 89),
+    Color32::from_rgb(138, 138, 138),
+    Color32::from_rgb(156, 84, 138),
+    Color32::from_rgb(190, 64, 159),
+];
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Overlays over images
 // ─────────────────────────────────────────────────────────────────────────────
 

@@ -2,7 +2,7 @@
 // Copyright (C) 2026 ThetaCursed
 
 use super::notification::ToastKind;
-use super::widgets::labeled_slider;
+use super::widgets::{labeled_slider, labeled_slider_gradient};
 use crate::app::TinyLumaApp;
 use crate::settings::FilterSettings;
 use crate::theme;
@@ -707,12 +707,13 @@ impl TinyLumaApp {
                     color_header.body_unindented(|ui| {
                         ui.group(|ui| {
                             let def = FilterSettings::default();
-                            let (c, d) = labeled_slider(
+                            let (c, d) = labeled_slider_gradient(
                                 ui,
                                 "Temp",
                                 &mut self.settings.temp,
                                 -100.0..=100.0,
                                 def.temp,
+                                &theme::TEMP_TRACK,
                             );
                             if c {
                                 color_changed = true;
@@ -720,12 +721,13 @@ impl TinyLumaApp {
                             if d {
                                 self.drag_active = true;
                             }
-                            let (c, d) = labeled_slider(
+                            let (c, d) = labeled_slider_gradient(
                                 ui,
                                 "Tint",
                                 &mut self.settings.tint,
                                 -100.0..=100.0,
                                 def.tint,
+                                &theme::TINT_TRACK,
                             );
                             if c {
                                 color_changed = true;
@@ -883,6 +885,19 @@ impl TinyLumaApp {
                                 &mut self.settings.grain,
                                 0.0..=100.0,
                                 def.grain,
+                            );
+                            if c {
+                                spatial_changed = true;
+                            }
+                            if d {
+                                self.drag_active = true;
+                            }
+                            let (c, d) = labeled_slider(
+                                ui,
+                                "Grain Size",
+                                &mut self.settings.grain_size,
+                                0.0..=100.0,
+                                def.grain_size,
                             );
                             if c {
                                 spatial_changed = true;

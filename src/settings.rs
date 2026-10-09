@@ -106,6 +106,13 @@ pub(crate) fn default_brush_hardness() -> f32 {
     crate::retouch::BrushSettings::default().hardness
 }
 
+/// Default grain-size slider value (RapidRAW's default position). With the
+/// current mapping this is a fine-but-visible ~2px noise cell at a 1080px
+/// short side.
+pub(crate) fn default_grain_size() -> f32 {
+    25.0
+}
+
 /// All settings for a single image (the sliders).
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub(crate) struct FilterSettings {
@@ -126,6 +133,10 @@ pub(crate) struct FilterSettings {
     pub(crate) sharpen: f32,
     pub(crate) lut_intensity: f32,
     pub(crate) grain: f32,
+    /// Grain scale, `0..100` (`50` = the historical fine grain). Larger values
+    /// give coarser grain. `serde(default)` keeps older presets/configs loading.
+    #[serde(default = "default_grain_size")]
+    pub(crate) grain_size: f32,
 }
 
 impl Default for FilterSettings {
@@ -149,6 +160,7 @@ impl Default for FilterSettings {
             sharpen: 0.0,
             lut_intensity: 0.0,
             grain: 0.0,
+            grain_size: default_grain_size(),
         }
     }
 }

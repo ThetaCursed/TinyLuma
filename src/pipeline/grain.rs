@@ -10,9 +10,10 @@
 //!   (`paper_resp` / `paper_resp_inverse`) and baked into a 2D LUT;
 //! - the grain is monochrome and is added to lightness.
 //!
-//! Noise is sampled in coordinates normalized to the short side with a fixed
-//! `zoom` — so the grain size does not depend on resolution (identical for
-//! preview and export). The `strength` parameter is the Grain slider.
+//! Noise is sampled in coordinates normalized to the short side with a `zoom`
+//! derived from the grain-size slider — so the grain size does not depend on
+//! resolution (identical for preview and export). The `strength` parameter is
+//! the Grain slider, the `size` parameter is the Grain Size slider.
 
 use rayon::prelude::*;
 use std::sync::OnceLock;
@@ -21,8 +22,19 @@ use std::sync::OnceLock;
 const OCTAVE_F: [f64; 3] = [0.4910, 0.9441, 1.7280];
 /// Octave amplitudes.
 const OCTAVE_A: [f64; 3] = [0.2340, 0.7850, 1.2150];
-/// Grain scale (roughly ISO ~1600 in darktable at a fixed scale).
-const GRAIN_ZOOM: f64 = 0.002;
+/// Reference short side (px) for the grain-size slider — RapidRAW's
+/// `REFERENCE_DIMENSION`, so both apps share the same grain scale.
+const GRAIN_SIZE_REFERENCE: f64 = 1080.0;
+/// Smallest noise cell (px at the reference short side). Matches RapidRAW's
+/// floor (`grain_size` is clamped to 0.1).
+const GRAIN_SIZE_MIN_CELL: f64 = 0.1;
+/// Largest noise cell (px at the reference short side). RapidRAW tops out at
+/// 2px, but that is right at the sampling limit of our ~1200px preview: the
+/// noise model's highest-energy octave would stay near Nyquist and alias into
+/// the same static for every slider value. Opening the top end up is what
+/// makes the slider visibly change the grain; the low end still matches
+/// RapidRAW's 0.1px floor.
+const GRAIN_SIZE_MAX_CELL: f64 = 8.0;
 /// Grain strength scale (darktable `GRAIN_LIGHTNESS_STRENGTH_SCALE`).
 const LIGHTNESS_STRENGTH_SCALE: f32 = 0.15;
 /// Size of the response 2D LUT.
@@ -157,18 +169,33 @@ fn simplex_2d(x: f64, y: f64, z: f64) -> f64 {
     total
 }
 
+/// Maps the `0..100` grain-size slider to the noise scale.
+///
+/// The cell grows linearly from 0.1px to 8px (at a 1080px short side): the fine
+/// end matches RapidRAW's floor, and the coarse end goes several times past
+/// their 2px maximum so the size is clearly visible at preview resolution. Our
+/// noise is normalized to the short side and its dominant octave `OCTAVE_F[2]`
+/// has a period of `zoom / f`, so the cell is `zoom / OCTAVE_F[2]`.
+pub(crate) fn grain_zoom(size: f32) -> f64 {
+    let t = (size.clamp(0.0, 100.0) / 100.0) as f64;
+    let cell_px = GRAIN_SIZE_MIN_CELL + (GRAIN_SIZE_MAX_CELL - GRAIN_SIZE_MIN_CELL) * t;
+    (OCTAVE_F[2] * cell_px / GRAIN_SIZE_REFERENCE).max(1e-6)
+}
+
 /// Generates a `w×h` grain map (values roughly in [-2.2, 2.2]).
 ///
 /// Coordinates are normalized to the short side → the grain size does not depend
-/// on resolution. `seed` shifts the field (different grain for different seeds).
-pub(crate) fn generate_map(w: usize, h: usize, seed: u64) -> Vec<f32> {
+/// on resolution. `size` is the `0..100` grain-size slider ([`grain_zoom`]);
+/// `seed` shifts the field (different grain for different seeds).
+pub(crate) fn generate_map(w: usize, h: usize, seed: u64, size: f32) -> Vec<f32> {
     let wd = w.min(h).max(1) as f64;
+    let zoom = grain_zoom(size);
     let offset = (seed % 100_000) as f64 * 0.137;
     let mut out = vec![0f32; w * h];
     out.par_iter_mut().enumerate().for_each(|(i, v)| {
         let x = (i % w) as f64 / wd;
         let y = (i / w) as f64 / wd;
-        *v = simplex_2d(x + offset, y, GRAIN_ZOOM) as f32;
+        *v = simplex_2d(x + offset, y, zoom) as f32;
     });
     out
 }
@@ -281,11 +308,50 @@ mod tests {
 
     #[test]
     fn generate_map_shape_and_range() {
-        let m = generate_map(32, 16, 42);
+        let m = generate_map(32, 16, 42, 50.0);
         assert_eq!(m.len(), 32 * 16);
         for &v in &m {
             assert!(v.abs() < 4.0, "noise too large: {v}");
         }
+    }
+
+    #[test]
+    fn grain_zoom_spans_fine_to_coarse() {
+        // Cell in px at the 1080 reference.
+        let cell = |s: f32| grain_zoom(s) / OCTAVE_F[2] * GRAIN_SIZE_REFERENCE;
+        assert!((cell(0.0) - GRAIN_SIZE_MIN_CELL).abs() < 1e-9);
+        assert!((cell(100.0) - GRAIN_SIZE_MAX_CELL).abs() < 1e-9);
+        assert!(grain_zoom(0.0) < grain_zoom(25.0));
+        assert!(grain_zoom(25.0) < grain_zoom(50.0));
+        assert!(grain_zoom(50.0) < grain_zoom(100.0));
+    }
+
+    #[test]
+    fn larger_size_gives_coarser_grain() {
+        // Coarser grain varies more slowly across neighbouring pixels, so the
+        // mean absolute difference between horizontally adjacent samples drops.
+        // Use a large-enough map that both cells are resolved.
+        let (w, h) = (512usize, 512usize);
+        let rough = |map: &[f32]| {
+            let mut sum = 0.0f64;
+            let mut n = 0usize;
+            for y in 0..h {
+                for x in 0..w - 1 {
+                    sum += (map[y * w + x + 1] - map[y * w + x]).abs() as f64;
+                    n += 1;
+                }
+            }
+            sum / n as f64
+        };
+        let fine = generate_map(w, h, 42, 25.0);
+        let coarse = generate_map(w, h, 42, 100.0);
+        assert!(
+            rough(&coarse) < rough(&fine),
+            "coarse {} vs fine {}",
+            rough(&coarse),
+            rough(&fine)
+        );
+        assert_ne!(fine, coarse);
     }
 }
 
@@ -298,7 +364,7 @@ mod bench_grain {
     #[ignore]
     fn bench_grain_map_1200() {
         let t = Instant::now();
-        let m = generate_map(1200, 800, 42);
+        let m = generate_map(1200, 800, 42, 50.0);
         println!(
             "grain map 1200x800: {:.1} ms ({} samples)",
             t.elapsed().as_secs_f64() * 1000.0,

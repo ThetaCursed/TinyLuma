@@ -772,7 +772,7 @@ impl TinyLumaApp {
         } else {
             (Vec::new(), 0, 0)
         };
-        let grain_map = Self::generate_grain_map(w, h, 42);
+        let grain_map = Self::generate_grain_map(w, h, 42, settings.grain_size);
 
         let mut output = vec![0u8; color_buffer.len()];
         Self::run_spatial_pass(
@@ -1007,6 +1007,12 @@ impl TinyLumaApp {
             self.spatial_base =
                 Self::compute_spatial_base(&self.settings, input, &self.luma_cache, w, h);
             self.spatial_base_valid = true;
+        }
+
+        // Keep the grain map in sync with the Grain Size slider before the
+        // spatial pass below borrows it.
+        if self.settings.grain != 0.0 {
+            self.ensure_grain_map(w, h);
         }
 
         // ---- Pass: Spatial effects ----

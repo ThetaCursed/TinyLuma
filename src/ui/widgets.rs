@@ -474,6 +474,32 @@ pub(crate) fn labeled_slider(
     range: std::ops::RangeInclusive<f32>,
     default: f32,
 ) -> (bool, bool) {
+    labeled_slider_impl(ui, label, value, range, default, None)
+}
+
+/// Same as [`labeled_slider`], but the rail is painted as a colour gradient.
+/// Used for the bipolar white-balance axes (temperature/tint), where the track
+/// colour is meaningful. `stops` are evenly spaced from `range.start()` to
+/// `range.end()`.
+pub(crate) fn labeled_slider_gradient(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    default: f32,
+    stops: &[egui::Color32],
+) -> (bool, bool) {
+    labeled_slider_impl(ui, label, value, range, default, Some(stops))
+}
+
+fn labeled_slider_impl(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    default: f32,
+    gradient: Option<&[egui::Color32]>,
+) -> (bool, bool) {
     let mut changed = false;
     let mut is_dragging = false;
     let right_padding = 3.0; // Right padding so it does not touch the scrollbar
@@ -529,32 +555,173 @@ pub(crate) fn labeled_slider(
             // Subtract the padding from the total slider width
             ui.spacing_mut().slider_width = ui.available_width() - right_padding;
 
-            let slider_resp = ui.add(
-                egui::Slider::new(value, range)
-                    .show_value(false)
-                    .trailing_fill(true),
-            );
-            // Double-click (left or right) on the slider resets it to its default
-            // value. The Slider only senses drags (not clicks), so `Response::clicked`
-            // never fires — we read the double-click straight from the pointer state
-            // and make sure the cursor is over this slider.
-            let double_clicked = ui.input(|i| {
-                i.pointer.button_double_clicked(egui::PointerButton::Primary)
-                    || i.pointer.button_double_clicked(egui::PointerButton::Secondary)
-            });
-            if double_clicked && slider_resp.hovered() && *value != default {
-                *value = default;
-                changed = true;
-            }
-            if slider_resp.changed() {
-                changed = true;
-            }
-            if slider_resp.dragged() {
-                is_dragging = true;
+            match gradient {
+                Some(stops) => {
+                    let (c, d) = axis_slider(ui, value, range, default, stops);
+                    changed |= c;
+                    is_dragging |= d;
+                }
+                None => {
+                    let slider_resp = ui.add(
+                        egui::Slider::new(value, range)
+                            .show_value(false)
+                            .trailing_fill(true),
+                    );
+                    // Double-click (left or right) on the slider resets it to its default
+                    // value. The Slider only senses drags (not clicks), so `Response::clicked`
+                    // never fires — we read the double-click straight from the pointer state
+                    // and make sure the cursor is over this slider.
+                    let double_clicked = ui.input(|i| {
+                        i.pointer.button_double_clicked(egui::PointerButton::Primary)
+                            || i.pointer.button_double_clicked(egui::PointerButton::Secondary)
+                    });
+                    if double_clicked && slider_resp.hovered() && *value != default {
+                        *value = default;
+                        changed = true;
+                    }
+                    if slider_resp.changed() {
+                        changed = true;
+                    }
+                    if slider_resp.dragged() {
+                        is_dragging = true;
+                    }
+                }
             }
         });
     });
 
     ui.add_space(6.0);
     (changed, is_dragging)
+}
+
+/// Horizontal slider whose rail is a colour gradient. Click/drag sets the value;
+/// double-click resets to `default`; the handle matches the stock egui slider so
+/// it blends with the rest of the panel. Returns `(changed, is_dragging)`.
+fn axis_slider(
+    ui: &mut egui::Ui,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    default: f32,
+    stops: &[egui::Color32],
+) -> (bool, bool) {
+    let min = *range.start();
+    let max = *range.end();
+    let span = (max - min).abs();
+
+    let height = ui.spacing().interact_size.y;
+    let width = ui.spacing().slider_width;
+    let (rect, mut response) =
+        ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click_and_drag());
+
+    let rail_radius = (ui.spacing().slider_rail_height * 0.5).max(1.0);
+    let rail = egui::Rect::from_min_max(
+        egui::pos2(rect.left(), rect.center().y - rail_radius),
+        egui::pos2(rect.right(), rect.center().y + rail_radius),
+    );
+    // The handle cannot reach past its own radius, exactly like egui's slider.
+    let handle_radius = rect.height() / 2.5;
+    let track = rail.x_range().shrink(handle_radius);
+
+    let mut changed = false;
+    if let Some(p) = response.interact_pointer_pos() {
+        let t = ((p.x - track.min) / (track.max - track.min)).clamp(0.0, 1.0);
+        let new = min + t * span;
+        if new != *value {
+            *value = new;
+            changed = true;
+        }
+    }
+    // Double-click (left or right) resets to the default, like the stock sliders.
+    let double_clicked = ui.input(|i| {
+        i.pointer.button_double_clicked(egui::PointerButton::Primary)
+            || i.pointer.button_double_clicked(egui::PointerButton::Secondary)
+    });
+    if double_clicked && response.hovered() && *value != default {
+        *value = default;
+        changed = true;
+    }
+    if changed {
+        response.mark_changed();
+    }
+
+    if ui.is_rect_visible(rect) {
+        let visuals = ui.style().interact(&response);
+        paint_gradient_rail(ui.painter(), rail, stops);
+
+        let t = if span > 0.0 {
+            ((*value - min) / span).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let center = egui::pos2(egui::lerp(track.min..=track.max, t), rect.center().y);
+        ui.painter().add(egui::epaint::CircleShape {
+            center,
+            radius: handle_radius + visuals.expansion,
+            fill: visuals.bg_fill,
+            stroke: visuals.fg_stroke,
+        });
+    }
+
+    // Keyboard: arrows nudge by 1 (the DragValue handles typing/precision).
+    if response.has_focus() {
+        let step = ui.input(|i| {
+            let up = i.num_presses(egui::Key::ArrowUp) + i.num_presses(egui::Key::ArrowRight);
+            let down = i.num_presses(egui::Key::ArrowDown) + i.num_presses(egui::Key::ArrowLeft);
+            up as f32 - down as f32
+        });
+        if step != 0.0 {
+            *value = (*value + step).clamp(min, max);
+            changed = true;
+            response.mark_changed();
+        }
+    }
+
+    let is_dragging = response.dragged();
+
+    (changed, is_dragging)
+}
+
+/// Paints a horizontal colour-gradient capsule matching egui's rounded rail:
+/// the two round end caps are drawn first, then the gradient mesh covers only
+/// the straight middle section, so the ends stay fully rounded (no square corners).
+fn paint_gradient_rail(painter: &egui::Painter, rail: egui::Rect, stops: &[egui::Color32]) {
+    if stops.len() < 2 || rail.width() <= 0.0 {
+        return;
+    }
+    let n = stops.len();
+    let r = rail.height() * 0.5;
+
+    // Round caps at both ends (same radius as the stock rail's rounding).
+    painter.circle_filled(egui::pos2(rail.left() + r, rail.center().y), r, stops[0]);
+    painter.circle_filled(
+        egui::pos2(rail.right() - r, rail.center().y),
+        r,
+        stops[n - 1],
+    );
+
+    // Gradient on the straight section between the cap centers, so the mesh is
+    // tangent to the caps and never pokes past them.
+    let inner = egui::Rect::from_min_max(
+        egui::pos2(rail.left() + r, rail.top()),
+        egui::pos2((rail.right() - r).max(rail.left() + r), rail.bottom()),
+    );
+    if inner.width() <= 0.0 {
+        return;
+    }
+    let mut mesh = egui::Mesh::default();
+    let xs: Vec<f32> = (0..n)
+        .map(|i| egui::lerp(inner.x_range(), i as f32 / (n - 1) as f32))
+        .collect();
+    for i in 0..n - 1 {
+        let (x0, x1) = (xs[i], xs[i + 1]);
+        let (c0, c1) = (stops[i], stops[i + 1]);
+        let base = mesh.vertices.len() as u32;
+        mesh.colored_vertex(egui::pos2(x0, inner.top()), c0);
+        mesh.colored_vertex(egui::pos2(x1, inner.top()), c1);
+        mesh.colored_vertex(egui::pos2(x1, inner.bottom()), c1);
+        mesh.colored_vertex(egui::pos2(x0, inner.bottom()), c0);
+        mesh.add_triangle(base, base + 1, base + 2);
+        mesh.add_triangle(base, base + 2, base + 3);
+    }
+    painter.add(egui::Shape::mesh(mesh));
 }

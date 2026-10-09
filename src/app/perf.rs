@@ -54,11 +54,12 @@ enum Slider {
     Sharpen,
     Dehaze,
     Grain,
+    GrainSize,
     LutIntensity,
 }
 
 impl Slider {
-    const ALL: [Slider; 16] = [
+    const ALL: [Slider; 17] = [
         Slider::Exposure,
         Slider::Contrast,
         Slider::Whites,
@@ -74,6 +75,7 @@ impl Slider {
         Slider::Sharpen,
         Slider::Dehaze,
         Slider::Grain,
+        Slider::GrainSize,
         Slider::LutIntensity,
     ];
 
@@ -94,6 +96,7 @@ impl Slider {
             Slider::Sharpen => "Sharpen",
             Slider::Dehaze => "Dehaze",
             Slider::Grain => "Grain",
+            Slider::GrainSize => "GrainSize",
             Slider::LutIntensity => "LutIntensity",
         }
     }
@@ -134,6 +137,7 @@ impl Slider {
             Slider::Sharpen => s.sharpen += 7.5,
             Slider::Dehaze => s.dehaze += NUDGE,
             Slider::Grain => s.grain += NUDGE,
+            Slider::GrainSize => s.grain_size += NUDGE,
             Slider::LutIntensity => s.lut_intensity += NUDGE,
         }
     }
@@ -162,6 +166,7 @@ fn baseline_settings() -> FilterSettings {
         sharpen: 45.0,
         lut_intensity: 85.0,
         grain: 30.0,
+        grain_size: 60.0,
     }
 }
 
@@ -258,6 +263,8 @@ struct Harness {
     clarity_sh: usize,
     spatial_base: SpatialBase,
     grain: Vec<f32>,
+    /// Grain-size slider value `grain` was generated for.
+    grain_size: f32,
     lut: Lut3D,
     combined: Lut3D,
     settings: FilterSettings,
@@ -268,7 +275,7 @@ impl Harness {
     fn new(w: usize, h: usize, baseline: FilterSettings, lut: Lut3D) -> Self {
         let base = synth_image(w, h);
         let n = base.len();
-        let grain = TinyLumaApp::generate_grain_map(w, h, 42);
+        let grain = TinyLumaApp::generate_grain_map(w, h, 42, baseline.grain_size);
         Self {
             w,
             h,
@@ -282,6 +289,7 @@ impl Harness {
             clarity_sh: 0,
             spatial_base: SpatialBase::default(),
             grain,
+            grain_size: baseline.grain_size,
             lut,
             combined: Lut3D {
                 size: 2,
@@ -367,6 +375,12 @@ impl Harness {
 
     /// Spatial pass on top of the prepared caches.
     fn run_spatial(&mut self) {
+        // Mirror the app: regenerate the grain map when the Size slider moved.
+        if self.settings.grain != 0.0 && self.grain_size != self.settings.grain_size {
+            self.grain =
+                TinyLumaApp::generate_grain_map(self.w, self.h, 42, self.settings.grain_size);
+            self.grain_size = self.settings.grain_size;
+        }
         let use_dehaze = self.settings.dehaze != 0.0;
         let input: &[u8] = if use_dehaze {
             &self.dehazed

@@ -247,6 +247,7 @@ impl TinyLumaApp {
         self.pan_offset = egui::Vec2::ZERO;
         self.grain_map.clear();
         self.grain_map_dims = (0, 0);
+        self.grain_map_size = crate::settings::default_grain_size();
         self.drag_active = false;
         self.was_dragging = false;
         self.full_render_pending = false;
@@ -649,11 +650,9 @@ impl TinyLumaApp {
         };
 
         // --- 3. GRAIN GENERATION ---
-        // The map is deterministic in size: reuse it if the size is the same.
-        if self.grain_map_dims != (rw_u, rh_u) {
-            self.grain_map = Self::generate_grain_map(rw_u, rh_u, 42);
-            self.grain_map_dims = (rw_u, rh_u);
-        }
+        // The map is deterministic in size and grain scale: reuse it when both
+        // match, otherwise regenerate (e.g. after the Grain Size slider moved).
+        self.ensure_grain_map(rw_u, rh_u);
 
         // --- 4. READY RENDER FROM CACHE OR RECOMPUTE ---
         if let Some(processed) = self
@@ -886,8 +885,19 @@ impl TinyLumaApp {
     }
 
     // Extract grain_map generation into a separate method
-    pub(crate) fn generate_grain_map(w: usize, h: usize, seed: u64) -> Vec<f32> {
-        crate::pipeline::grain::generate_map(w, h, seed)
+    pub(crate) fn generate_grain_map(w: usize, h: usize, seed: u64, size: f32) -> Vec<f32> {
+        crate::pipeline::grain::generate_map(w, h, seed, size)
+    }
+
+    /// Regenerates the cached grain map when the frame size or the Grain Size
+    /// slider changed. Cheap to call every frame: it usually does nothing.
+    pub(crate) fn ensure_grain_map(&mut self, w: usize, h: usize) {
+        if self.grain_map_dims == (w, h) && self.grain_map_size == self.settings.grain_size {
+            return;
+        }
+        self.grain_map = Self::generate_grain_map(w, h, 42, self.settings.grain_size);
+        self.grain_map_dims = (w, h);
+        self.grain_map_size = self.settings.grain_size;
     }
 }
 

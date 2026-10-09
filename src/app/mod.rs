@@ -101,6 +101,8 @@ pub(crate) struct TinyLumaApp {
     pub(crate) grain_map: Vec<f32>,
     /// Size for which `grain_map` was generated (for reuse).
     pub(crate) grain_map_dims: (usize, usize),
+    /// Grain-size slider value `grain_map` was generated for (for reuse).
+    pub(crate) grain_map_size: f32,
     /// LRU cache of decoded previews — instant frame switching.
     pub(crate) preview_cache: image_io::PreviewCache,
     pub(crate) drag_active: bool,
@@ -571,6 +573,7 @@ impl TinyLumaApp {
             combined_lut: None,
             grain_map: Vec::new(),
             grain_map_dims: (0, 0),
+            grain_map_size: crate::settings::default_grain_size(),
             // The preview cache budget is set in bytes (base + render), so
             // memory does not grow linearly with the number of open frames. At 1200px
             // 256 MiB is ~30–40 previews around the current one.
