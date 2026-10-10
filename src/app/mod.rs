@@ -249,6 +249,14 @@ impl TinyLumaApp {
         // Restore the retouch layer and invalidate the heal + render caches.
         self.retouch.set_layer(snap.retouch);
         self.retouch_dirty = true;
+        // An undo/redo during an active session restarts it from the restored
+        // state, so a later `Esc` reverts to (and never past) this point.
+        self.retouch.session_base = if self.retouch.active {
+            Some(self.retouch.layer.clone())
+        } else {
+            None
+        };
+        self.retouch.session_hist_len = self.history.len();
         // Restore the crop (display-only, no re-render needed). Any in-progress
         // crop gesture is dropped so it cannot overwrite the restored value, and
         // `committed` follows so the frame-end commit does not re-record it.
@@ -263,6 +271,7 @@ impl TinyLumaApp {
         } else {
             None
         };
+        self.crop.session_hist_len = self.history.len();
         self.crop.angle_base = None;
         if let Some(path) = &self.image_path {
             self.preview_cache.drop_render(path);

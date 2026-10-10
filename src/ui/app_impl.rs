@@ -176,10 +176,32 @@ impl eframe::App for TinyLumaApp {
         self.handle_shortcuts(ctx);
         // Retouch hotkeys ([ / ] size, Shift+[ / Shift+] hardness, Esc).
         self.handle_retouch_shortcuts(ctx);
-        // Esc leaves the crop tool; Enter is the keyboard shortcut for "Done".
-        if self.crop.active && !ctx.wants_keyboard_input() {
-            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        // Tool hotkeys (Photoshop-style): C = Crop, J = Spot Healing Brush.
+        // Plain keys only (so Cmd/Ctrl+C is untouched), with an image open and
+        // no modal in the way.
+        if self.texture.is_some()
+            && !ctx.wants_keyboard_input()
+            && !self.modal_open()
+            && ctx.input(|i| i.modifiers.is_none())
+        {
+            if ctx.input(|i| i.key_pressed(egui::Key::C)) {
                 self.crop_toggle();
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::J)) {
+                self.retouch_toggle();
+            }
+        }
+        // Enter applies the crop and leaves; Esc discards everything done in
+        // this session and leaves. An open popup (e.g. the ratio dropdown) takes
+        // the first Esc, so it closes instead of cancelling the crop.
+        let popup_open = ctx.memory(|m| m.any_popup_open());
+        if self.crop.active
+            && !ctx.wants_keyboard_input()
+            && !self.modal_open()
+            && !popup_open
+        {
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.crop_cancel();
             } else if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
                 self.crop_toggle();
             }
@@ -336,6 +358,15 @@ impl TinyLumaApp {
         if new_zoom <= 1.0 {
             self.pan_offset = egui::Vec2::ZERO;
         }
+    }
+
+    /// True while a modal dialog or the batch-progress window is open, so
+    /// canvas/tool hotkeys stay out of the way.
+    pub(crate) fn modal_open(&self) -> bool {
+        self.show_save_dialog
+            || self.show_close_confirm
+            || self.show_batch_progress
+            || self.show_apply_all_dialog
     }
 
     /// Undo/redo and zoom hotkeys. They do not fire in a text field.

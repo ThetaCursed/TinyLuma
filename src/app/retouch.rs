@@ -52,6 +52,11 @@ pub(crate) struct RetouchState {
     pub(crate) full_path: Option<PathBuf>,
     /// The full-resolution textures must be (re)uploaded.
     pub(crate) full_texture_dirty: bool,
+    /// The heal layer when the tool was opened (or after the last undo/redo
+    /// while it was open). Cancelling the tool (`Esc`) restores it.
+    pub(crate) session_base: Option<RetouchLayer>,
+    /// `history.len()` when the session started; `Esc` truncates back to it.
+    pub(crate) session_hist_len: usize,
 }
 
 impl Default for RetouchState {
@@ -73,6 +78,8 @@ impl Default for RetouchState {
             full_healed: None,
             full_path: None,
             full_texture_dirty: false,
+            session_base: None,
+            session_hist_len: 0,
         }
     }
 }
@@ -271,6 +278,47 @@ impl TinyLumaApp {
         self.retouch.stroke_baseline = None;
     }
 
+    /// Leaves the retouch tool and throws away every heal made while it was
+    /// open (`Esc`), including their history entries so redo cannot bring them
+    /// back. An in-progress gesture is discarded first.
+    pub(crate) fn retouch_cancel(&mut self) {
+        if self.retouch.stroke_active {
+            self.retouch_cancel_stroke();
+        }
+        if let Some(base) = self.retouch.session_base.take() {
+            self.retouch.set_layer(base);
+            self.history.truncate(self.retouch.session_hist_len);
+            if let Some(path) = self.image_path.clone() {
+                let layer = self.retouch.layer.clone();
+                self.session.save_retouch(&path, layer);
+            }
+            self.mark_retouch_dirty();
+        }
+        // Closes the tool and clears the session fields.
+        self.retouch_toggle();
+    }
+
+    /// Clears every heal edit on the current image as a single undo step,
+    /// mirroring the crop tool's `Reset`. The brush size/hardness are settings
+    /// and are left untouched.
+    pub(crate) fn retouch_reset(&mut self) {
+        // A mid-air gesture is discarded, then nothing else would be cleared.
+        if self.retouch.stroke_active {
+            self.retouch_cancel_stroke();
+        }
+        if self.retouch.layer.is_empty() {
+            return;
+        }
+        // Record the pre-clear layer so one Ctrl+Z brings all the heals back.
+        self.history.push(self.snapshot());
+        self.retouch.set_layer(RetouchLayer::default());
+        if let Some(path) = self.image_path.clone() {
+            let layer = self.retouch.layer.clone();
+            self.session.save_retouch(&path, layer);
+        }
+        self.mark_retouch_dirty();
+    }
+
     /// Toggles the retouch tool and forces a re-render.
     pub(crate) fn retouch_toggle(&mut self) {
         // Never leave a half-finished gesture behind.
@@ -280,6 +328,15 @@ impl TinyLumaApp {
         // Crop and retouch both own the canvas: leaving retouch is implicit.
         self.crop.active = false;
         self.retouch.active = !self.retouch.active;
+        // A session runs from activation (or the last undo/redo while active)
+        // to deactivation; `Esc` reverts to `session_base`.
+        if self.retouch.active {
+            self.retouch.session_base = Some(self.retouch.layer.clone());
+            self.retouch.session_hist_len = self.history.len();
+        } else {
+            self.retouch.session_base = None;
+            self.retouch.session_hist_len = 0;
+        }
         self.retouch.stroke_active = false;
         self.retouch.pending_path.clear();
         self.retouch.stroke_baseline = None;

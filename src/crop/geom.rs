@@ -66,31 +66,24 @@ impl NormRect {
 
     /// Integer pixel bounds `(x, y, w, h)` of the frame for an image of
     /// `img_w × img_h`. The result is always at least 1×1 and inside the image.
+    ///
+    /// The size is rounded from the frame's own `w`/`h` rather than from two
+    /// independently rounded edges: that way translating the frame never changes
+    /// `w`/`h`, so the `W × H px` readout stays put instead of flickering by ±1
+    /// as the frame slides along (the edges' fractional parts used to cross `.5`
+    /// at different moments).
     pub(crate) fn pixel_rect(&self, img_w: u32, img_h: u32) -> (u32, u32, u32, u32) {
         if img_w == 0 || img_h == 0 {
             return (0, 0, 1, 1);
         }
         let fw = img_w as f32;
         let fh = img_h as f32;
-        let mut x0 = (self.x * fw).round().clamp(0.0, fw - 1.0);
-        let mut y0 = (self.y * fh).round().clamp(0.0, fh - 1.0);
-        let mut x1 = ((self.x + self.w) * fw).round().clamp(x0 + 1.0, fw);
-        let mut y1 = ((self.y + self.h) * fh).round().clamp(y0 + 1.0, fh);
-        // Guard against rounding ordering surprises.
-        if x1 <= x0 {
-            x0 = (x0 - 1.0).max(0.0);
-            x1 = x0 + 1.0;
-        }
-        if y1 <= y0 {
-            y0 = (y0 - 1.0).max(0.0);
-            y1 = y0 + 1.0;
-        }
-        (
-            x0 as u32,
-            y0 as u32,
-            (x1 - x0) as u32,
-            (y1 - y0) as u32,
-        )
+        let w = (self.w * fw).round().clamp(1.0, fw);
+        let h = (self.h * fh).round().clamp(1.0, fh);
+        // Position from the top-left, clamped so the rounded size stays inside.
+        let x = (self.x * fw).round().clamp(0.0, fw - w);
+        let y = (self.y * fh).round().clamp(0.0, fh - h);
+        (x as u32, y as u32, w as u32, h as u32)
     }
 }
 
@@ -447,6 +440,46 @@ mod tests {
             h: 1.0,
         };
         assert_eq!(r.pixel_rect(100, 50), (50, 0, 50, 50));
+    }
+
+    #[test]
+    fn pixel_size_is_stable_under_translation() {
+        // Sliding the frame over the image must not change the reported size:
+        // the readout used to flicker by ±1 px while dragging.
+        let r = NormRect {
+            x: 0.0,
+            y: 0.0,
+            w: 0.25,
+            h: 0.5,
+        };
+        let (_, _, w0, h0) = r.pixel_rect(1920, 1080);
+        for step in 0..=200 {
+            let shifted = NormRect {
+                x: step as f32 / 400.0,
+                y: step as f32 / 800.0,
+                ..r
+            };
+            let (_, _, w, h) = shifted.pixel_rect(1920, 1080);
+            assert_eq!((w, h), (w0, h0), "size changed at step {step}");
+        }
+    }
+
+    #[test]
+    fn pixel_size_grows_monotonically_when_resizing() {
+        // Rounding must not make the size bounce back and forth as the frame
+        // grows: it has to be non-decreasing.
+        let mut prev = 0;
+        for step in 0..=200 {
+            let r = NormRect {
+                x: 0.0,
+                y: 0.0,
+                w: step as f32 / 200.0,
+                h: 0.5,
+            };
+            let (_, _, w, _) = r.pixel_rect(1920, 1080);
+            assert!(w >= prev, "width went {prev} -> {w} at step {step}");
+            prev = w;
+        }
     }
 
     #[test]

@@ -8,13 +8,24 @@ use eframe::egui;
 use egui_phosphor::regular as ph;
 
 use crate::app::TinyLumaApp;
+use crate::retouch::BrushSettings;
 use crate::theme;
+
+/// Size of the `Reset` / `Done` action buttons in the retouch options bar.
+/// Same height as the crop bar's action buttons so the two tools feel alike.
+const ACTION_BTN: egui::Vec2 = egui::vec2(78.0, 24.0);
 
 impl TinyLumaApp {
     /// Retouch keyboard shortcuts: `[` / `]` change the size, `Shift+[` /
-    /// `Shift+]` the hardness, `Esc` leaves the tool.
+    /// `Shift+]` the hardness. `Enter` keeps the heals and leaves the tool
+    /// (keyboard form of `Done`); `Esc` discards every heal made in this session
+    /// and leaves.
     pub(crate) fn handle_retouch_shortcuts(&mut self, ctx: &egui::Context) {
-        if !self.retouch.active || ctx.wants_keyboard_input() {
+        if !self.retouch.active
+            || ctx.wants_keyboard_input()
+            || self.modal_open()
+            || ctx.memory(|m| m.any_popup_open())
+        {
             return;
         }
         let (open, close) = ctx.input(|i| {
@@ -33,13 +44,12 @@ impl TinyLumaApp {
                 self.retouch.brush.size = (self.retouch.brush.size * f).clamp(4.0, 400.0);
             }
         }
+        // `Esc` cancels (the in-progress gesture and the whole session), `Enter`
+        // applies (commits the pending stroke) and leaves.
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            if self.retouch.stroke_active {
-                self.retouch_cancel_stroke();
-            }
-            if self.retouch.active {
-                self.retouch_toggle();
-            }
+            self.retouch_cancel();
+        } else if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+            self.retouch_toggle();
         }
     }
 
@@ -56,8 +66,8 @@ impl TinyLumaApp {
         } else {
             92.0
         };
-        // Hotkey hints only when there is horizontal room for them.
-        let show_hints = viewport_rect.width() > 700.0;
+        // Defaults restored on a handle double-click.
+        let defaults = BrushSettings::default();
         // Center on the canvas (the side panels are symmetric, but this stays
         // correct even if they are not).
         let offset_x = viewport_rect.center().x - ctx.screen_rect().center().x;
@@ -69,11 +79,27 @@ impl TinyLumaApp {
                 egui::vec2(offset_x, viewport_rect.top() + 14.0),
             )
             .show(ctx, |ui| {
+                // Fixed numeric-field width. With the icon fallback font the
+                // value text grows by 2px at the 2->3 digit boundary
+                // (`99px` -> `100px`), which would widen the whole (centered)
+                // bar; while dragging the Size slider that re-centres the bar
+                // under the cursor and the panel jitters back and forth. A wider
+                // `interact_size.x` keeps both DragValues a constant width.
+                ui.spacing_mut().interact_size.x = 48.0;
                 // Reserve the background shape and fill it only after the content
-                // is laid out, so the plaque hugs the controls exactly (otherwise
-                // there is a long empty tail after the last hotkey hint).
+                // is laid out, so the plaque hugs the controls exactly.
                 let bg = ui.painter().add(egui::Shape::Noop);
-                let content = ui.horizontal(|child| {
+                // A plain `horizontal` row is only `interact_size.y` (18px) tall,
+                // so the taller buttons make it grow and the short widgets end up
+                // ~3px high. Allocate the row at the button height instead, while
+                // leaving `interact_size.y` at its default so the sliders keep
+                // their normal (18px) handle size.
+                let mut row_size = ui.available_size_before_wrap();
+                row_size.y = ACTION_BTN.y;
+                let content = ui.allocate_ui_with_layout(
+                    row_size,
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |child| {
                     child.label(
                         egui::RichText::new(ph::FIRST_AID)
                             .size(15.0)
@@ -95,11 +121,13 @@ impl TinyLumaApp {
                             .suffix("px"),
                     );
                     // Wide slider + accent fill (same look as the main sliders).
-                    child.spacing_mut().slider_width = slider_w;
-                    child.add(
-                        egui::Slider::new(&mut self.retouch.brush.size, 4.0..=400.0)
-                            .show_value(false)
-                            .trailing_fill(true),
+                    // Double-clicking the handle snaps back to the default size.
+                    reset_slider(
+                        child,
+                        &mut self.retouch.brush.size,
+                        4.0..=400.0,
+                        defaults.size,
+                        slider_w,
                     );
 
                     child.add_space(12.0);
@@ -120,24 +148,52 @@ impl TinyLumaApp {
                     if hard_resp.changed() {
                         self.retouch.brush.hardness = (hardness_pct / 100.0).clamp(0.0, 1.0);
                     }
-                    child.spacing_mut().slider_width = slider_w;
-                    child.add(
-                        egui::Slider::new(&mut self.retouch.brush.hardness, 0.0..=1.0)
-                            .show_value(false)
-                            .trailing_fill(true),
+                    reset_slider(
+                        child,
+                        &mut self.retouch.brush.hardness,
+                        0.0..=1.0,
+                        defaults.hardness,
+                        slider_w,
                     );
 
-                    if show_hints {
-                        // Separator between the sliders and the hotkey hints.
-                        child.add_space(12.0);
-                        v_separator(child);
-                        child.add_space(12.0);
+                    // Actions, matching the crop bar: `Reset` clears every heal
+                    // on this image (one undo step), `Done` leaves the tool. The
+                    // `[`/`]`/`Esc` hotkeys still work, they are just no longer
+                    // advertised with keycaps.
+                    child.add_space(12.0);
+                    v_separator(child);
+                    child.add_space(12.0);
 
-                        // Size is what people actually use; hardness hotkeys still
-                        // work but are not advertised.
-                        hint_group(child, "Size", &["[", "]"]);
-                        child.add_space(12.0);
-                        hint_group(child, "Exit", &["Esc"]);
+                    // Both buttons share one width so they read as a pair.
+                    if child
+                        .add_enabled(
+                            !self.retouch.layer.is_empty(),
+                            egui::Button::new(
+                                egui::RichText::new(format!(
+                                    "{} Reset",
+                                    ph::ARROWS_CLOCKWISE
+                                ))
+                                .size(12.0),
+                            )
+                            .min_size(ACTION_BTN),
+                        )
+                        .on_hover_text("Reset all heal edits on this image")
+                        .clicked()
+                    {
+                        self.retouch_reset();
+                    }
+                    if child
+                        .add_sized(
+                            ACTION_BTN,
+                            egui::Button::new(
+                                egui::RichText::new(format!("{} Done", ph::CHECK)).size(12.0),
+                            )
+                            .fill(theme::ACCENT),
+                        )
+                        .on_hover_text("Keep the heals and leave (Enter). Esc discards them.")
+                        .clicked()
+                    {
+                        self.retouch_toggle();
                     }
                 });
 
@@ -334,7 +390,50 @@ impl TinyLumaApp {
     }
 }
 
-/// A short vertical separator between the sliders and the hotkey hints.
+/// A slider (no value text, accent trailing fill) that snaps back to `default`
+/// when its **handle** is double-clicked.
+///
+/// `Slider` senses drags only, so click sensing is mixed in with
+/// `Response::interact`; the pointer must additionally fall on the handle
+/// circle, not just anywhere on the rail.
+fn reset_slider(
+    ui: &mut egui::Ui,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    default: f32,
+    width: f32,
+) {
+    let min = *range.start();
+    let max = *range.end();
+    ui.spacing_mut().slider_width = width;
+    let response = ui.add(
+        egui::Slider::new(value, range)
+            .show_value(false)
+            .trailing_fill(true),
+    );
+    // `interact` builds a new `Response`, but the slider already wrote the value
+    // in place, so only double-click detection is needed here.
+    let response = response.interact(egui::Sense::click());
+    if response.double_clicked() {
+        if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+            // Mirror egui's slider handle geometry (see slider.rs): the handle
+            // centre sits on the shrunk track at the value's position.
+            let handle_r = response.rect.height() / 2.5;
+            let track = response.rect.x_range().shrink(handle_r);
+            let t = if max > min {
+                ((*value - min) / (max - min)).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let center = egui::pos2(egui::lerp(track, t), response.rect.center().y);
+            if p.distance(center) <= handle_r + 4.0 {
+                *value = default;
+            }
+        }
+    }
+}
+
+/// A short vertical separator between the sliders and the action buttons.
 fn v_separator(ui: &mut egui::Ui) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(9.0, 18.0), egui::Sense::hover());
     let x = rect.center().x;
@@ -343,37 +442,4 @@ fn v_separator(ui: &mut egui::Ui) {
         rect.top()..=rect.bottom(),
         egui::Stroke::new(1.0, theme::DIVIDER),
     );
-}
-
-/// A small caption followed by its keycaps, e.g. `Size [ ]`.
-fn hint_group(ui: &mut egui::Ui, label: &str, keys: &[&str]) {
-    ui.label(
-        egui::RichText::new(label)
-            .size(12.0)
-            .color(theme::TEXT_SECONDARY),
-    );
-    for k in keys {
-        keycap(ui, k);
-    }
-}
-
-/// Draws a small keyboard-key badge ("keycap") so a hotkey hint reads as a
-/// shortcut rather than as a label.
-fn keycap(ui: &mut egui::Ui, text: &str) {
-    let galley = ui.painter().layout_no_wrap(
-        text.to_owned(),
-        egui::FontId::monospace(12.0),
-        theme::TEXT,
-    );
-    let pad = egui::vec2(6.0, 3.0);
-    let size = galley.size() + pad * 2.0;
-    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-    ui.painter()
-        .rect_filled(rect, theme::RADIUS_SM, theme::BG_ELEVATED);
-    ui.painter().rect_stroke(
-        rect,
-        theme::RADIUS_SM,
-        egui::Stroke::new(1.0, theme::NAV_BORDER),
-    );
-    ui.painter().galley(rect.min + pad, galley, theme::TEXT);
 }

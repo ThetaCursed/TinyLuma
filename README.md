@@ -67,6 +67,12 @@ Most editors silently wipe workflow metadata, while others force-embed it. TinyL
 | Key | Action |
 | :--- | :--- |
 | `\` | Toggle Before / After split screen |
+| `C` | Crop tool |
+| `J` | Spot Healing Brush |
+| `Enter` | Apply the active tool's edits and leave it |
+| `Esc` | Discard the active tool's edits and leave it |
+| `[` / `]` | Brush size (Spot Healing Brush) |
+| `Shift + [` / `Shift + ]` | Brush hardness |
 | `←` / `→` | Previous / Next image in session |
 | `Ctrl + Z` / `Ctrl + Y` | Undo / Redo (drag coalesced) |
 | `Ctrl + +` / `Ctrl + -` | Zoom In / Out |

@@ -40,6 +40,9 @@ const CROP_FIT: f32 = 0.90;
 const CROP_BAR_INSET: f32 = 56.0;
 /// Size of an icon button in the crop options bar — a comfortable click target.
 const BAR_BTN: egui::Vec2 = egui::vec2(28.0, 24.0);
+/// Minimum width of the `Reset` / `Done` buttons in the framing row. They are
+/// stretched past this so both rows of the options bar end on the same line.
+const BAR_ACTION_MIN_W: f32 = 72.0;
 
 /// A grouped icon button in the crop options bar: framed (so it has a hover
 /// highlight) and sized for easy clicking.
@@ -105,11 +108,24 @@ impl TinyLumaApp {
         // `pan_offset`). Entering the tool resets them, so the image still snaps
         // to the fit position; from there the mouse wheel zooms under the cursor.
         let hover_pos = ui.input(|i| i.pointer.hover_pos());
-        let over_overlay = hover_pos.map_or(false, |p| {
-            self.crop_options_rect.map_or(false, |r| r.contains(p))
-                || self.toolbar_rect.map_or(false, |r| r.expand(2.0).contains(p))
-                || self.tools_rect.map_or(false, |r| r.contains(p))
+        // The canvas owns the pointer/scroll only when egui does not. The crop
+        // bar's dropdown is a separate floating `Area`, so its rect is not in
+        // `over_overlay`: without this the wheel would zoom the image and a
+        // click on a ratio would also grab the crop frame underneath. Block the
+        // canvas while any popup is open or while the pointer is on a layer
+        // above the background (canvas).
+        let popup_open = ctx.memory(|m| m.any_popup_open());
+        let over_floating = hover_pos.map_or(false, |p| {
+            ctx.layer_id_at(p)
+                .map_or(false, |layer| layer.order != egui::Order::Background)
         });
+        let over_overlay = popup_open
+            || over_floating
+            || hover_pos.map_or(false, |p| {
+                self.crop_options_rect.map_or(false, |r| r.contains(p))
+                    || self.toolbar_rect.map_or(false, |r| r.expand(2.0).contains(p))
+                    || self.tools_rect.map_or(false, |r| r.contains(p))
+            });
         let pointer_over = hover_pos.map_or(false, |p| viewport_rect.contains(p));
         if pointer_over && !over_overlay {
             let mut zoom_factor = ui.input(|i| i.zoom_delta());
@@ -366,6 +382,11 @@ impl TinyLumaApp {
             return;
         }
         let offset_x = viewport_rect.center().x - ctx.screen_rect().center().x;
+        // Width the rows should fill, measured from the previous frame (row 2 is
+        // the wider one). Used to stretch `Reset`/`Done` to the shared right edge.
+        let bar_target = self.crop.options_width.max(0.0);
+        let mut row1_natural = 0.0_f32;
+        let mut row2_natural = 0.0_f32;
 
         egui::Area::new(egui::Id::new("crop_options"))
             .order(egui::Order::Foreground)
@@ -419,13 +440,27 @@ impl TinyLumaApp {
                         );
                         bar_separator(ui);
 
+                        // `Reset` / `Done` are equal and stretch to the end of the
+                        // row, so the framing row lines up with the tools row below.
+                        // `bar_separator` ends with `add_space`, so the cursor (and
+                        // thus `used`) already sits where the first button starts.
+                        let gap = ui.spacing().item_spacing.x;
+                        let used = ui.min_rect().width();
+                        let natural = used + BAR_ACTION_MIN_W + gap + BAR_ACTION_MIN_W;
+                        row1_natural = natural;
+                        let target = bar_target.max(natural);
+                        let btn_w =
+                            ((target - used - gap) * 0.5).max(BAR_ACTION_MIN_W);
                         if ui
-                            .add(
+                            .add_sized(
+                                egui::vec2(btn_w, BAR_BTN.y),
                                 egui::Button::new(
-                                    egui::RichText::new(format!("{} Reset", ph::ARROWS_CLOCKWISE))
-                                        .size(12.0),
-                                )
-                                .min_size(egui::vec2(72.0, BAR_BTN.y)),
+                                    egui::RichText::new(format!(
+                                        "{} Reset",
+                                        ph::ARROWS_CLOCKWISE
+                                    ))
+                                    .size(12.0),
+                                ),
                             )
                             .on_hover_text("Reset all crop edits (frame, rotation, flip, straighten)")
                             .clicked()
@@ -433,14 +468,14 @@ impl TinyLumaApp {
                             self.crop_reset();
                         }
                         if ui
-                            .add(
+                            .add_sized(
+                                egui::vec2(btn_w, BAR_BTN.y),
                                 egui::Button::new(
                                     egui::RichText::new(format!("{} Done", ph::CHECK)).size(12.0),
                                 )
-                                .min_size(egui::vec2(66.0, BAR_BTN.y))
                                 .fill(theme::ACCENT),
                             )
-                            .on_hover_text("Leave the crop tool (Esc)")
+                            .on_hover_text("Apply the crop and leave (Enter). Esc cancels the crop.")
                             .clicked()
                         {
                             self.crop_toggle();
@@ -479,7 +514,7 @@ impl TinyLumaApp {
                         );
                         ui.spacing_mut().slider_width = 130.0;
                         let mut angle = self.crop.crop.angle;
-                        if ui
+                        let slider = ui
                             .add(
                                 egui::Slider::new(
                                     &mut angle,
@@ -488,9 +523,22 @@ impl TinyLumaApp {
                                 .show_value(false)
                                 .trailing_fill(true),
                             )
-                            .on_hover_text("Straighten by degrees (the frame auto-fits)")
-                            .changed()
-                        {
+                            .on_hover_text(
+                                "Straighten by degrees \u{2014} double-click to reset to 0\u{b0} \
+                                 (the frame auto-fits)",
+                            );
+                        // `changed` is a field on the slider's own response and is
+                        // lost by `interact`, so read it before re-sensing clicks.
+                        let angle_changed = slider.changed();
+                        // The slider only senses drags, so click sensing has to be
+                        // added explicitly for `double_clicked` to fire at all.
+                        let slider = slider.interact(egui::Sense::click());
+                        // Double-click snaps back to level; otherwise follow the drag.
+                        // Checked first: the slider also reports `changed` on the
+                        // clicks of a double-click, and the reset must win.
+                        if slider.double_clicked() {
+                            self.crop_set_angle(0.0);
+                        } else if angle_changed {
                             self.crop_set_angle(angle);
                         }
                         ui.add_sized(
@@ -516,8 +564,12 @@ impl TinyLumaApp {
                                 self.notify(ToastKind::Info, "Already level");
                             }
                         }
+                        row2_natural = ui.min_rect().width();
                     });
                 });
+
+                // Remember the widest row for the next frame so row 1 can fill it.
+                self.crop.options_width = row1_natural.max(row2_natural);
 
                 let rect = content.response.rect.expand2(egui::vec2(12.0, 8.0));
                 self.crop_options_rect = Some(rect);

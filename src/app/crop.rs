@@ -50,6 +50,13 @@ pub(crate) struct CropState {
     /// this base for the current angle, so lowering the angle restores the frame
     /// instead of only ever shrinking it. `None` when the angle is zero.
     pub(crate) angle_base: Option<NormRect>,
+    /// `history.len()` when the session started. Cancelling the tool (`Esc`)
+    /// truncates the history back to it, discarding the session's undo entry.
+    pub(crate) session_hist_len: usize,
+    /// Target content width of the floating options bar, measured from the
+    /// previous frame (the widest of the two rows). The framing row uses it to
+    /// stretch `Reset`/`Done` so both rows share the same right edge. UI-only.
+    pub(crate) options_width: f32,
 }
 
 impl Default for CropState {
@@ -62,6 +69,8 @@ impl Default for CropState {
             committed: Crop::default(),
             session_baseline: None,
             angle_base: None,
+            session_hist_len: 0,
+            options_width: 0.0,
         }
     }
 }
@@ -130,23 +139,45 @@ impl TinyLumaApp {
             self.crop_end_gesture();
         }
         if self.crop.active {
-            self.crop.active = false;
-            self.crop_options_rect = None;
-            self.crop.session_baseline = None;
-            self.crop.angle_base = None;
-            self.is_panning = false;
-            self.crop_save_session();
+            self.crop_deactivate();
         } else {
             if self.retouch.active {
                 self.retouch_toggle();
             }
             self.crop.active = true;
             self.crop.session_baseline = Some(self.crop.crop);
+            self.crop.session_hist_len = self.history.len();
             self.crop.angle_base = None;
             self.zoom_scale = 1.0;
             self.pan_offset = egui::Vec2::ZERO;
             self.is_panning = false;
         }
+    }
+
+    /// Shared teardown for leaving the crop tool: clears the transient overlay
+    /// state and persists the (possibly reverted) crop.
+    fn crop_deactivate(&mut self) {
+        self.crop.active = false;
+        self.crop_options_rect = None;
+        self.crop.session_baseline = None;
+        self.crop.session_hist_len = 0;
+        self.crop.angle_base = None;
+        self.is_panning = false;
+        self.crop_save_session();
+    }
+
+    /// Leaves the crop tool and throws away every edit made while it was open
+    /// (`Esc`). The session's single undo entry is dropped, so the discarded
+    /// crop cannot come back with redo.
+    pub(crate) fn crop_cancel(&mut self) {
+        self.crop.dragging = false;
+        self.crop.drag = None;
+        if let Some(base) = self.crop.session_baseline {
+            self.crop.crop = base;
+            self.crop.committed = base;
+        }
+        self.history.truncate(self.crop.session_hist_len);
+        self.crop_deactivate();
     }
 
     /// Selects an aspect preset (a discrete action; committed at frame end).
@@ -284,10 +315,14 @@ impl TinyLumaApp {
             return;
         }
         if self.crop.active {
-            if let Some(base) = self.crop.session_baseline.take() {
-                let mut base_snap = self.snapshot();
-                base_snap.crop = base;
-                self.history.push(base_snap);
+            // One undo entry per session: record the pre-session crop the first
+            // time the frame changes.
+            if self.history.len() == self.crop.session_hist_len {
+                if let Some(base) = self.crop.session_baseline {
+                    let mut base_snap = self.snapshot();
+                    base_snap.crop = base;
+                    self.history.push(base_snap);
+                }
             }
         } else {
             let mut base_snap = self.snapshot();

@@ -43,6 +43,18 @@ impl History {
         self.future.clear();
     }
 
+    /// Number of recorded "before" states.
+    pub(crate) fn len(&self) -> usize {
+        self.past.len()
+    }
+
+    /// Drops every recorded state beyond `len` and clears the redo branch.
+    /// Used when a whole tool session is cancelled (`Esc`).
+    pub(crate) fn truncate(&mut self, len: usize) {
+        self.past.truncate(len);
+        self.future.clear();
+    }
+
     /// Record the state that existed BEFORE a change.
     /// Any new record truncates the redo branch.
     pub(crate) fn push(&mut self, before: Snapshot) {
@@ -113,5 +125,22 @@ mod tests {
         let redone = h.redo(snap(Crop::default())).unwrap();
         assert!(!redone.crop.is_identity());
         assert_eq!(redone.crop, cropped());
+    }
+
+    #[test]
+    fn truncate_drops_a_session_and_its_redo() {
+        let mut h = History::new();
+        h.push(snap(Crop::default()));
+        let baseline_len = h.len();
+        // Simulate a tool session that recorded two entries.
+        h.push(snap(cropped()));
+        h.push(snap(Crop::default()));
+        assert_eq!(h.len(), baseline_len + 2);
+        // Cancelling the session drops them and clears any redo branch.
+        let _ = h.undo(snap(cropped()));
+        assert!(h.can_redo());
+        h.truncate(baseline_len);
+        assert_eq!(h.len(), baseline_len);
+        assert!(!h.can_redo());
     }
 }
