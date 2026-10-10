@@ -283,8 +283,9 @@ impl TinyLumaApp {
     /// Draws the translucent accent-blue indication of the region painted during
     /// the current gesture. The heal itself only runs on release.
     ///
-    /// The indication is a single coverage texture (union of dabs), so overlapping
-    /// brush circles never stack up into a darker band.
+    /// The indication is a single coverage texture built from the distance to the
+    /// painted polyline (the smooth capsule swept by the brush), so overlapping
+    /// dabs never stack up or leave a scalloped edge.
     pub(crate) fn draw_retouch_overlay(
         &mut self,
         ctx: &egui::Context,
@@ -294,7 +295,7 @@ impl TinyLumaApp {
         if !self.retouch.stroke_active || self.retouch.pending_path.is_empty() {
             return;
         }
-        self.refresh_overlay_texture(ctx);
+        self.refresh_overlay_texture(ctx, image_rect);
 
         let (Some(tex), Some(area)) = (self.retouch.overlay_tex.as_ref(), self.retouch.overlay_area)
         else {
@@ -317,7 +318,7 @@ impl TinyLumaApp {
     }
 
     /// Rebuilds the indication texture when the pending path changed.
-    fn refresh_overlay_texture(&mut self, ctx: &egui::Context) {
+    fn refresh_overlay_texture(&mut self, ctx: &egui::Context, image_rect: egui::Rect) {
         if !self.retouch.overlay_dirty {
             return;
         }
@@ -328,10 +329,18 @@ impl TinyLumaApp {
             return;
         };
         let (ww, wh) = self.retouch_work_dims();
-        // The indication is a soft hint — bound its resolution so large working
-        // images stay cheap. `scale` maps working pixels to this grid.
-        const OVERLAY_GRID: f32 = 1024.0;
-        let scale = (OVERLAY_GRID / ww.max(wh) as f32).min(1.0);
+        // Match the indication to its on-screen size: about one texel per
+        // screen pixel when zoomed out, up to one texel per image pixel when
+        // zoomed in. A fixed low-resolution grid reads as stair steps as soon
+        // as the canvas is magnified (a brush a few grid pixels across is just
+        // a blocky blob). The cap keeps a full-canvas stroke affordable.
+        const MAX_OVERLAY_DIM: f32 = 2048.0;
+        let max_dim = ww.max(wh).max(1) as f32;
+        let screen_scale = image_rect.width().max(image_rect.height()) / max_dim;
+        let scale = screen_scale
+            .clamp(0.05, 1.0)
+            .min(MAX_OVERLAY_DIM / max_dim)
+            .max(0.05);
         let gw = ((ww as f32 * scale).round() as usize).max(1);
         let gh = ((wh as f32 * scale).round() as usize).max(1);
         let Some(cov) = self

@@ -1390,6 +1390,7 @@ mod tests {
             hardness: 1.0,
             opacity: 1.0,
             kind: SpotKind::ProximityMatch,
+            path: None,
         });
 
         let settings = FilterSettings::default();

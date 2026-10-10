@@ -185,7 +185,7 @@ impl RetouchState {
 
     /// Adds a spot, updating the heal cache incrementally when possible.
     pub(crate) fn add_spot(&mut self, spot: Spot, base: &RgbImage) {
-        self.layer.push(spot);
+        self.layer.push(spot.clone());
         let dims = (base.width(), base.height());
         let incremental = matches!(
             &self.healed_cache,
@@ -239,18 +239,18 @@ impl TinyLumaApp {
 
         if !path.is_empty() {
             let (ww, wh) = self.retouch_work_dims();
-            let spots = self.retouch.brush.spots_along(&path, ww, wh);
+            // One painted stroke becomes one op, healed by a single union fill
+            // (`apply_stroke`) instead of a fill per dab.
+            let stroke = self.retouch.brush.to_stroke(&path, ww, wh);
             if let Some(base) = self.preview_base.as_ref() {
-                for spot in &spots {
-                    // Preview cache (used when the tool is off / exported preview).
-                    self.retouch.add_spot(*spot, base);
-                }
+                // Preview cache (used when the tool is off / exported preview).
+                self.retouch.add_spot(stroke.clone(), base);
             }
             // Full-resolution working image (shown while the tool is active).
             if let Some(mut full) = self.retouch.full_healed.take() {
                 RetouchState::apply_spots_cached(
                     &mut self.retouch.spot_cache,
-                    &spots,
+                    std::slice::from_ref(&stroke),
                     &mut full,
                 );
                 self.retouch.full_healed = Some(full);

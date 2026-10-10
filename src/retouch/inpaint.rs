@@ -365,7 +365,7 @@ fn patchmatch(
     ch: usize,
     iters: usize,
     init: Option<&(Vec<i32>, Vec<i32>)>,
-) -> (Vec<i32>, Vec<i32>) {
+) -> (Vec<i32>, Vec<i32>, Vec<f32>) {
     let (w, h) = (lvl.w, lvl.h);
     let n = w * h;
     let mut nx = vec![0i32; n];
@@ -458,13 +458,13 @@ fn patchmatch(
             }
         }
     }
-    (nx, ny)
+    (nx, ny, dist)
 }
 
 /// Reconstructs the hole from the nearest-neighbour field: every patch votes for
 /// the known pixels it overlaps, weighted by its match quality. Averaging the
 /// votes removes the hard patch seams a plain copy would show.
-fn vote(lvl: &Level, ch: usize, nx: &[i32], ny: &[i32]) -> Vec<f32> {
+fn vote(lvl: &Level, ch: usize, nx: &[i32], ny: &[i32], dist: &[f32]) -> Vec<f32> {
     let (w, h, p) = (lvl.w, lvl.h, lvl.ph as i32);
     let mut acc = vec![0.0f32; w * h * ch];
     let mut wsum = vec![0.0f32; w * h];
@@ -474,7 +474,9 @@ fn vote(lvl: &Level, ch: usize, nx: &[i32], ny: &[i32]) -> Vec<f32> {
         for x in 0..w as i32 {
             let t = y as usize * w + x as usize;
             let (sx, sy) = (nx[t], ny[t]);
-            let d = patch_dist(lvl, ch, x, y, sx, sy, f32::MAX);
+            // Reuse the distance PatchMatch already settled on instead of
+            // recomputing the same patch SSD for every target pixel.
+            let d = dist[t];
             let weight = 1.0 / (d / norm + 1.0e-4);
             for dy in -p..=p {
                 let yt = y + dy;
@@ -626,8 +628,8 @@ pub(crate) fn complete(w: usize, h: usize, ch: usize, img: &[f32], hole: &[bool]
             continue;
         }
 
-        let (nx, ny) = patchmatch(&levels[li], ch, ITERS, init_nnf.as_ref());
-        levels[li].img = vote(&levels[li], ch, &nx, &ny);
+        let (nx, ny, dist) = patchmatch(&levels[li], ch, ITERS, init_nnf.as_ref());
+        levels[li].img = vote(&levels[li], ch, &nx, &ny, &dist);
         coarse_filled = Some(levels[li].img.clone());
         coarse_dims = (lw, lh);
 
@@ -659,7 +661,102 @@ pub(crate) fn complete(w: usize, h: usize, ch: usize, img: &[f32], hole: &[bool]
             }
         }
     }
+    restore_microtexture(w, h, ch, img, hole, &mut out);
     out
+}
+
+/// Adds fine micro-texture back on top of the smooth completion.
+///
+/// `complete` fills the hole by averaging many overlapping patches: that is
+/// excellent for colour and structure, but it low-passes the texture, so a
+/// large blemish heals into a slightly "blurry" disc even though its colour is
+/// right. This pass transfers the texture band (the residual above a small blur)
+/// of the best-matching source region back into the hole. The low-pass radius
+/// sets how coarse that band is: it must be wide enough to bring back the
+/// medium weave of denim/skin, not just single-pixel grain.
+///
+/// `out` already holds the smooth fill; only hole pixels are touched.
+fn restore_microtexture(w: usize, h: usize, ch: usize, img: &[f32], hole: &[bool], out: &mut [f32]) {
+    // Low-pass radius (in pixels) that defines the transferred texture band. A
+    // 1-px radius only brings back the finest grain; real denim/skin also has
+    // structure at ~3-5 px, which the patch vote smooths away, so the band has
+    // to reach that far. Measured on a stochastic multi-octave texture, this
+    // lifts the medium-frequency energy inside the hole from ~0.5x to ~1.1x of
+    // the surroundings.
+    const DETAIL_RADIUS: i32 = 3;
+    // Low-pass of the *known* pixels only (box). Hole pixels are unknown and
+    // must not leak into the filter.
+    let mut low = vec![0.0f32; w * h * ch];
+    let mut acc = vec![0.0f32; ch];
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * w + x;
+            if hole[i] {
+                continue;
+            }
+            for a in acc.iter_mut() {
+                *a = 0.0;
+            }
+            let mut cnt = 0.0f32;
+            for dy in -DETAIL_RADIUS..=DETAIL_RADIUS {
+                for dx in -DETAIL_RADIUS..=DETAIL_RADIUS {
+                    let nx = x as i32 + dx;
+                    let ny = y as i32 + dy;
+                    if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
+                        continue;
+                    }
+                    let j = ny as usize * w + nx as usize;
+                    if hole[j] {
+                        continue;
+                    }
+                    for c in 0..ch {
+                        acc[c] += img[j * ch + c];
+                    }
+                    cnt += 1.0;
+                }
+            }
+            if cnt > 0.0 {
+                for c in 0..ch {
+                    low[i * ch + c] = acc[c] / cnt;
+                }
+            }
+        }
+    }
+
+    // One coherent source offset for the whole hole (ring SSD match). Its shifted
+    // rect is guaranteed hole-free, so the transferred detail is always real
+    // texture, never a blend of the fill itself.
+    let Some((bx0, by0, bx1, by1)) = hole_bbox(hole, w, h) else {
+        return;
+    };
+    let hole_max = (bx1 - bx0).max(by1 - by0);
+    let ring = (hole_max / 16).clamp(2, 8) as usize;
+    let max_radius = (hole_max + 8).max(8);
+    let Some((dx, dy)) = best_offset(w, h, ch, img, hole, ring, max_radius) else {
+        return;
+    };
+
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * w + x;
+            if !hole[i] {
+                continue;
+            }
+            let sx = x as i32 + dx;
+            let sy = y as i32 + dy;
+            if sx < 0 || sy < 0 || sx >= w as i32 || sy >= h as i32 {
+                continue;
+            }
+            let j = sy as usize * w + sx as usize;
+            if hole[j] {
+                continue;
+            }
+            for c in 0..ch {
+                let detail = img[j * ch + c] - low[j * ch + c];
+                out[i * ch + c] = (out[i * ch + c] + detail).clamp(0.0, 1.0);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -718,6 +815,93 @@ mod complete_tests {
         assert!(max - min > 0.3, "fill collapsed to a flat value");
     }
 
+    /// Texture must survive at both scales, not just the finest grain: the
+    /// medium weave (~3-5 px) is what makes a healed denim/skin patch blend in.
+    /// Guards the `DETAIL_RADIUS` band in `restore_microtexture`.
+    #[test]
+    fn complete_keeps_medium_texture() {
+        fn box_blur(buf: &[f32], w: usize, h: usize, r: i32) -> Vec<f32> {
+            let mut out = vec![0.0f32; w * h];
+            for y in 0..h as i32 {
+                for x in 0..w as i32 {
+                    let mut sum = 0.0f32;
+                    let mut n = 0.0f32;
+                    for dy in -r..=r {
+                        for dx in -r..=r {
+                            let xx = x + dx;
+                            let yy = y + dy;
+                            if xx < 0 || yy < 0 || xx >= w as i32 || yy >= h as i32 {
+                                continue;
+                            }
+                            sum += buf[yy as usize * w + xx as usize];
+                            n += 1.0;
+                        }
+                    }
+                    out[y as usize * w + x as usize] = sum / n;
+                }
+            }
+            out
+        }
+
+        let (w, h) = (200usize, 200usize);
+        let mut img = vec![0.0f32; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                // Stochastic multi-octave texture (closer to real denim/skin):
+                // fine grain + two coarser weave octaves, non-periodic.
+                let v = 0.45
+                    + hash_noise(x, y) * 0.04
+                    + hash_noise(x / 2, y / 2) * 0.05
+                    + hash_noise(x / 4, y / 4) * 0.06;
+                img[y * w + x] = v.clamp(0.0, 1.0);
+            }
+        }
+        let (cx, cy, r) = (100.0f32, 100.0f32, 18.0f32);
+        let mut hole = vec![false; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                let dx = x as f32 - cx;
+                let dy = y as f32 - cy;
+                if dx * dx + dy * dy <= r * r {
+                    hole[y * w + x] = true;
+                }
+            }
+        }
+        for i in 0..w * h {
+            if hole[i] {
+                img[i] = 0.15;
+            }
+        }
+        let out = complete(w, h, 1, &img, &hole);
+
+        let b3 = box_blur(&out, w, h, 1);
+        let b7 = box_blur(&out, w, h, 4);
+        let (mut fine_in, mut fine_out) = (0.0f64, 0.0f64);
+        let (mut med_in, mut med_out) = (0.0f64, 0.0f64);
+        let (mut n_in, mut n_out) = (0.0f64, 0.0f64);
+        for y in 1..h - 1 {
+            for x in 1..w - 1 {
+                let i = y * w + x;
+                let d = ((x as f32 - cx).powi(2) + (y as f32 - cy).powi(2)).sqrt();
+                let fine = (4.0 * out[i] - out[i - 1] - out[i + 1] - out[i - w] - out[i + w]).abs();
+                let med = (b3[i] - b7[i]).abs();
+                if d <= r - 3.0 {
+                    fine_in += fine as f64;
+                    med_in += med as f64;
+                    n_in += 1.0;
+                } else if d >= r + 6.0 && d <= r + 40.0 {
+                    fine_out += fine as f64;
+                    med_out += med as f64;
+                    n_out += 1.0;
+                }
+            }
+        }
+        let fine_ratio = (fine_in / n_in) / (fine_out / n_out);
+        let med_ratio = (med_in / n_in) / (med_out / n_out);
+        assert!(fine_ratio > 0.7, "fine texture collapsed: {fine_ratio:.3}");
+        assert!(med_ratio > 0.7, "medium texture collapsed: {med_ratio:.3}");
+    }
+
     #[test]
     fn complete_is_deterministic() {
         let (w, h) = (32usize, 32usize);
@@ -759,6 +943,84 @@ mod complete_tests {
         let img = vec![0.1f32, 0.2, 0.3, 0.4];
         assert_eq!(complete(2, 2, 1, &img, &[false; 4]), img);
         assert_eq!(complete(2, 2, 1, &img, &[true; 4]), img);
+    }
+
+    fn hash_noise(x: usize, y: usize) -> f32 {
+        let mut h = (x as u32)
+            .wrapping_mul(0x9E37_79B1)
+            ^ (y as u32).wrapping_mul(0x85EB_CA77);
+        h ^= h >> 15;
+        h = h.wrapping_mul(0x2C1B_3C6D);
+        h ^= h >> 12;
+        (h & 0xFFFF) as f32 / 65535.0 - 0.5
+    }
+
+    /// The completion must not low-pass the fill into a "blurry disc": the
+    /// high-frequency (micro-texture) energy inside the hole must stay close to
+    /// the surrounding texture. Without the detail pass below this ratio drops
+    /// to ~0.2.
+    #[test]
+    fn complete_keeps_microtexture() {
+        let (w, h) = (160usize, 160usize);
+        // Skin-like texture: slow shading + fine grain.
+        let mut img = vec![0.0f32; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                let base = 0.55 + 0.10 * ((x as f32 / 40.0).sin()) + 0.05 * ((y as f32 / 55.0).sin());
+                let grain = hash_noise(x, y) * 0.10 + hash_noise(x / 2, y / 2) * 0.06;
+                img[y * w + x] = (base + grain).clamp(0.0, 1.0);
+            }
+        }
+        let (cx, cy, r) = (80.0f32, 80.0f32, 24.0f32);
+        let mut hole = vec![false; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                let dx = x as f32 - cx;
+                let dy = y as f32 - cy;
+                if dx * dx + dy * dy <= r * r {
+                    hole[y * w + x] = true;
+                }
+            }
+        }
+        // A smooth "defect" inside the hole (its content is treated as unknown).
+        for i in 0..w * h {
+            if hole[i] {
+                img[i] = 0.72;
+            }
+        }
+        let out = complete(w, h, 1, &img, &hole);
+
+        let hf = |buf: &[f32], x: usize, y: usize| -> f32 {
+            let c = buf[y * w + x];
+            let l = buf[y * w + x - 1];
+            let rr = buf[y * w + x + 1];
+            let u = buf[(y - 1) * w + x];
+            let d = buf[(y + 1) * w + x];
+            (4.0 * c - l - rr - u - d).abs()
+        };
+        let mut inside = 0.0f64;
+        let mut n_in = 0.0f64;
+        let mut outside = 0.0f64;
+        let mut n_out = 0.0f64;
+        for y in 1..h - 1 {
+            for x in 1..w - 1 {
+                let dx = x as f32 - cx;
+                let dy = y as f32 - cy;
+                let d2 = dx * dx + dy * dy;
+                if d2 <= (r - 3.0) * (r - 3.0) {
+                    inside += hf(&out, x, y) as f64;
+                    n_in += 1.0;
+                } else if d2 >= (r + 6.0) * (r + 6.0) && d2 <= (r + 30.0) * (r + 30.0) {
+                    outside += hf(&img, x, y) as f64;
+                    n_out += 1.0;
+                }
+            }
+        }
+        let ratio = (inside / n_in) / (outside / n_out);
+        assert!(
+            ratio > 0.7,
+            "micro-texture collapsed inside the hole: ratio {ratio:.3}"
+        );
     }
 }
 

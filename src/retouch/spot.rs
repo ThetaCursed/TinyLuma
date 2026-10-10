@@ -8,6 +8,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 
+use super::brush::stamp_segment_dist;
 use super::inpaint::{best_offset, complete, dilate};
 use super::poisson::{membrane_fill, seamless_clone};
 use super::raster::{FloatRegion, Rect};
@@ -15,7 +16,7 @@ use super::raster::{FloatRegion, Rect};
 /// A single heal spot. Resolution-independent: the center is normalized to
 /// `0..1` and the radius to the longer image side, so the same layer applies
 /// identically to the preview and the full-resolution export.
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub(crate) struct Spot {
     /// Center in image space, `0..1` (x right, y down).
     pub(crate) center: [f32; 2],
@@ -27,6 +28,11 @@ pub(crate) struct Spot {
     pub(crate) opacity: f32,
     /// Which fill algorithm to use.
     pub(crate) kind: SpotKind,
+    /// For a painted stroke: the dab centers of the whole path (normalized,
+    /// in order). The entire gesture is healed by **one** union fill instead of
+    /// one fill per dab, which removes the inter-dab seams and works on the
+    /// micro-texture coherently. `None` for a single circular dab.
+    pub(crate) path: Option<Vec<[f32; 2]>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -95,8 +101,18 @@ fn spot_geometry(w: usize, h: usize, spot: &Spot) -> Option<SpotGeom> {
     // Search geometry (see `docs/RETOUCH.md` §5.3).
     let ring = ((radius_px / 8.0) as i32).clamp(3, 16) as usize;
     let max_radius = (radius_px as i32 + 8).max(4);
-    // The region must cover the hole plus the whole search window plus the ring.
-    let margin = radius_px.ceil() as i32 + max_radius + ring as i32 + 2;
+    // The region must cover the hole plus the whole search window. Proximity
+    // Match also compares a ring of known pixels around the hole, so its source
+    // rect needs the ring margin; content-aware searches source *patches* and
+    // has no ring, so reserving that margin would only make it score extra area.
+    let margin = radius_px.ceil() as i32
+        + max_radius
+        + 2
+        + if matches!(spot.kind, SpotKind::ProximityMatch) {
+            ring as i32
+        } else {
+            0
+        };
 
     let x0 = ((cx - margin as f32).floor() as i32).clamp(0, w as i32) as usize;
     let y0 = ((cy - margin as f32).floor() as i32).clamp(0, h as i32) as usize;
@@ -120,32 +136,210 @@ fn spot_geometry(w: usize, h: usize, spot: &Spot) -> Option<SpotGeom> {
     })
 }
 
-/// Applies one spot to an 8-bit RGB image.
+/// Pixel geometry of a painted stroke: the bounded region and search params.
+struct StrokeGeom {
+    rect: Rect,
+    radius_px: f32,
+    ring: usize,
+    max_radius: i32,
+}
+
+/// Bounding region + search parameters for a stroke's capsule.
+fn stroke_geometry(w: usize, h: usize, spot: &Spot, path: &[[f32; 2]]) -> Option<StrokeGeom> {
+    if w == 0 || h == 0 || path.is_empty() {
+        return None;
+    }
+    let max_dim = w.max(h) as f32;
+    let radius_px = (spot.radius * max_dim).max(1.0);
+    let ring = ((radius_px / 8.0) as i32).clamp(3, 16) as usize;
+    let max_radius = (radius_px as i32 + 8).max(4);
+    // Same kind-aware margin as a dab (see `spot_geometry`).
+    let margin = radius_px.ceil() as i32
+        + max_radius
+        + 2
+        + if matches!(spot.kind, SpotKind::ProximityMatch) {
+            ring as i32
+        } else {
+            0
+        };
+
+    let mut minx = f32::MAX;
+    let mut miny = f32::MAX;
+    let mut maxx = f32::MIN;
+    let mut maxy = f32::MIN;
+    for p in path {
+        let x = p[0] * w as f32;
+        let y = p[1] * h as f32;
+        minx = minx.min(x);
+        miny = miny.min(y);
+        maxx = maxx.max(x);
+        maxy = maxy.max(y);
+    }
+    let x0 = ((minx - margin as f32).floor() as i32).clamp(0, w as i32) as usize;
+    let y0 = ((miny - margin as f32).floor() as i32).clamp(0, h as i32) as usize;
+    let x1 = ((maxx + margin as f32).ceil() as i32).clamp(0, w as i32) as usize;
+    let y1 = ((maxy + margin as f32).ceil() as i32).clamp(0, h as i32) as usize;
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    Some(StrokeGeom {
+        rect: Rect {
+            x: x0,
+            y: y0,
+            w: x1 - x0,
+            h: y1 - y0,
+        },
+        radius_px,
+        ring,
+        max_radius,
+    })
+}
+
+/// Region touched by an op: the dab circle or the stroke capsule, inflated by
+/// the search margin. Shared by the cache and the geometry helpers.
+fn op_rect(w: usize, h: usize, spot: &Spot) -> Option<Rect> {
+    match &spot.path {
+        Some(path) => stroke_geometry(w, h, spot, path).map(|g| g.rect),
+        None => spot_geometry(w, h, spot).map(|g| g.rect),
+    }
+}
+
+/// A copy of `spot` as a single circular dab at `center` (used by the stroke
+/// size fallback).
+fn dab_at(spot: &Spot, center: [f32; 2]) -> Spot {
+    Spot {
+        center,
+        radius: spot.radius,
+        hardness: spot.hardness,
+        opacity: spot.opacity,
+        kind: spot.kind,
+        path: None,
+    }
+}
+
+/// Fraction of the brush radius that is healed at full strength for a given
+/// `hardness` (`0..1`).
+///
+/// A healing brush must fully repair almost the whole brush: if the composite
+/// faded back to the original part-way out, the outer edge of the object being
+/// removed would survive as a light/dark ring (a circular object with a bezel
+/// leaves a visible arc at 50%). The solid core is therefore 80–100% of the
+/// radius and `hardness` only widens the soft blend in that last band. The
+/// Poisson blend already makes the seam invisible, so a large core costs
+/// nothing in quality. Shared by `apply_spot` and the overlay's
+/// `stroke_coverage`, so the indication always matches the healed region.
+pub(crate) fn core_fraction(hardness: f32) -> f32 {
+    0.8 + 0.2 * hardness.clamp(0.0, 1.0)
+}
+
+/// Single-fill budget. A stroke whose bounding region exceeds this is healed dab
+/// by dab instead: one content-aware fill over tens of megapixels would freeze
+/// the UI and allocate a huge pyramid. This only triggers on strokes that span a
+/// large part of a high-resolution image, never on ordinary blemish removal.
+const STROKE_FILL_MAX_PX: usize = 1_500_000;
+
+/// Applies one heal operation to an 8-bit RGB image: either a single circular
+/// dab or a whole painted stroke (`spot.path`).
 pub(crate) fn apply_spot(base: &mut RgbImage, spot: &Spot) {
+    match &spot.path {
+        Some(path) => apply_stroke(base, spot, path),
+        None => apply_dab(base, spot),
+    }
+}
+
+/// A single circular dab. The distance field is the squared distance to the
+/// centre.
+fn apply_dab(base: &mut RgbImage, spot: &Spot) {
     let w = base.width() as usize;
     let h = base.height() as usize;
     let Some(geom) = spot_geometry(w, h, spot) else {
         return;
     };
-    let rect = geom.rect;
-    let radius_px = geom.radius_px;
-    let (ring, max_radius) = (geom.ring, geom.max_radius);
-    let (lcx, lcy) = (geom.lcx, geom.lcy);
+    let (rw, rh) = (geom.rect.w, geom.rect.h);
+    let mut dist2 = vec![0.0f32; rw * rh];
+    for y in 0..rh {
+        let dy = (y as f32 + 0.5) - geom.lcy;
+        for x in 0..rw {
+            let dx = (x as f32 + 0.5) - geom.lcx;
+            dist2[y * rw + x] = dx * dx + dy * dy;
+        }
+    }
+    apply_shape(
+        base,
+        spot,
+        geom.rect,
+        &dist2,
+        geom.radius_px,
+        geom.ring,
+        geom.max_radius,
+    );
+}
 
+/// A whole painted stroke. The distance field is the squared distance to the
+/// polyline through the resampled dab centres — the capsule swept by the brush.
+/// The union is healed by **one** completion, so there are no per-dab seams and
+/// the micro-texture is synthesized once, coherently.
+fn apply_stroke(base: &mut RgbImage, spot: &Spot, path: &[[f32; 2]]) {
+    let w = base.width() as usize;
+    let h = base.height() as usize;
+    let Some(geom) = stroke_geometry(w, h, spot, path) else {
+        return;
+    };
+    if geom.rect.w.saturating_mul(geom.rect.h) > STROKE_FILL_MAX_PX {
+        // Too large for one coherent fill: heal dab by dab instead.
+        for center in path {
+            apply_dab(base, &dab_at(spot, *center));
+        }
+        return;
+    }
+    let (rw, rh) = (geom.rect.w, geom.rect.h);
+    let pad = geom.radius_px + 1.0;
+    let mut dist2 = vec![f32::MAX; rw * rh];
+    let local = |p: &[f32; 2]| {
+        (
+            p[0] * w as f32 - geom.rect.x as f32,
+            p[1] * h as f32 - geom.rect.y as f32,
+        )
+    };
+    if path.len() == 1 {
+        let a = local(&path[0]);
+        stamp_segment_dist(&mut dist2, rw, rh, a, a, pad);
+    } else {
+        for seg in path.windows(2) {
+            stamp_segment_dist(&mut dist2, rw, rh, local(&seg[0]), local(&seg[1]), pad);
+        }
+    }
+    apply_shape(
+        base,
+        spot,
+        geom.rect,
+        &dist2,
+        geom.radius_px,
+        geom.ring,
+        geom.max_radius,
+    );
+}
+
+/// Shared fill + composite for a shape given as a squared-distance field over
+/// the region (`f32::MAX` = outside the stamping neighbourhood).
+fn apply_shape(
+    base: &mut RgbImage,
+    spot: &Spot,
+    rect: Rect,
+    dist2: &[f32],
+    radius_px: f32,
+    ring: usize,
+    max_radius: i32,
+) {
     let region = FloatRegion::from_rgb8(base, rect);
     let (rw, rh) = (rect.w, rect.h);
     let ch = region.ch;
-
-    // Circular hole mask.
-    let mut hole = vec![false; rw * rh];
     let r2 = radius_px * radius_px;
-    for y in 0..rh {
-        for x in 0..rw {
-            let dx = (x as f32 + 0.5) - lcx;
-            let dy = (y as f32 + 0.5) - lcy;
-            if dx * dx + dy * dy <= r2 {
-                hole[y * rw + x] = true;
-            }
+
+    let mut hole = vec![false; rw * rh];
+    for (i, &d2) in dist2.iter().enumerate() {
+        if d2 <= r2 {
+            hole[i] = true;
         }
     }
     if hole.iter().all(|&b| !b) {
@@ -190,33 +384,36 @@ pub(crate) fn apply_spot(base: &mut RgbImage, spot: &Spot) {
         SpotKind::CreateTexture => membrane_fill(rw, rh, ch, &region.data, &hole),
     };
 
-    // Composite with opacity and a feathered coverage mask.
+    // Composite with opacity and a feathered coverage mask. A fully hard brush
+    // still gets a one-pixel ramp at the outline: without it the binary mask
+    // edge lands exactly on the pixel grid and the healed patch reads as a
+    // jagged circle (stair steps) when magnified.
     let hard = spot.hardness.clamp(0.0, 1.0);
     let opacity = spot.opacity.clamp(0.0, 1.0);
-    let inner = hard * radius_px;
-    let feather = (radius_px - inner).max(1.0e-3);
+    const AA: f32 = 1.0;
+    let inner = (core_fraction(hard) * radius_px).min(radius_px - AA).max(0.0);
+    let feather = (radius_px - inner).max(AA);
 
     let mut out = region.data.clone();
-    for y in 0..rh {
-        for x in 0..rw {
-            let dx = (x as f32 + 0.5) - lcx;
-            let dy = (y as f32 + 0.5) - lcy;
-            let d = (dx * dx + dy * dy).sqrt();
-            if d >= radius_px {
-                continue;
-            }
-            let coverage = if d <= inner {
-                1.0
-            } else {
-                let t = ((radius_px - d) / feather).clamp(0.0, 1.0);
-                // Smoothstep for a soft, banding-free falloff.
-                t * t * (3.0 - 2.0 * t)
-            };
-            let a = coverage * opacity;
-            let i = (y * rw + x) * ch;
-            for c in 0..ch {
-                out[i + c] = region.data[i + c] * (1.0 - a) + filled[i + c] * a;
-            }
+    for (i, &d2) in dist2.iter().enumerate() {
+        if d2 == f32::MAX {
+            continue;
+        }
+        let d = d2.sqrt();
+        if d >= radius_px {
+            continue;
+        }
+        let coverage = if d <= inner {
+            1.0
+        } else {
+            let t = ((radius_px - d) / feather).clamp(0.0, 1.0);
+            // Smoothstep for a soft, banding-free falloff.
+            t * t * (3.0 - 2.0 * t)
+        };
+        let a = coverage * opacity;
+        let bi = i * ch;
+        for c in 0..ch {
+            out[bi + c] = region.data[bi + c] * (1.0 - a) + filled[bi + c] * a;
         }
     }
 
@@ -254,6 +451,10 @@ struct CachedRegion {
 
 /// ~128 MB: room for a few thousand dabs, still bounded on long sessions.
 const SPOT_CACHE_MAX_BYTES: usize = 128 << 20;
+
+/// A single entry is skipped above this region size: a huge stroke would evict
+/// most of the cache for one result that is unlikely to be replayed soon.
+const CACHE_MAX_PX: usize = 4_000_000;
 
 impl SpotCache {
     /// Drops every entry (e.g. when the image itself changed and old regions no
@@ -306,7 +507,7 @@ fn write_region(base: &mut RgbImage, rect: &Rect, data: &[u8]) {
 
 /// Cache key: the spot parameters + image size + the exact input pixels of the
 /// region. Hashing ~66 KB is microseconds, negligible next to the fill it avoids.
-fn spot_cache_key(w: usize, h: usize, spot: &Spot, geom: &SpotGeom, base: &RgbImage) -> u64 {
+fn spot_cache_key(w: usize, h: usize, spot: &Spot, rect: Rect, base: &RgbImage) -> u64 {
     let mut hasher = DefaultHasher::new();
     w.hash(&mut hasher);
     h.hash(&mut hasher);
@@ -316,11 +517,18 @@ fn spot_cache_key(w: usize, h: usize, spot: &Spot, geom: &SpotGeom, base: &RgbIm
     spot.hardness.to_bits().hash(&mut hasher);
     spot.opacity.to_bits().hash(&mut hasher);
     (spot.kind as u8).hash(&mut hasher);
-    geom.rect.x.hash(&mut hasher);
-    geom.rect.y.hash(&mut hasher);
-    geom.rect.w.hash(&mut hasher);
-    geom.rect.h.hash(&mut hasher);
-    hasher.write(&read_region(base, &geom.rect));
+    if let Some(path) = &spot.path {
+        path.len().hash(&mut hasher);
+        for p in path {
+            p[0].to_bits().hash(&mut hasher);
+            p[1].to_bits().hash(&mut hasher);
+        }
+    }
+    rect.x.hash(&mut hasher);
+    rect.y.hash(&mut hasher);
+    rect.w.hash(&mut hasher);
+    rect.h.hash(&mut hasher);
+    hasher.write(&read_region(base, &rect));
     hasher.finish()
 }
 
@@ -329,18 +537,22 @@ fn spot_cache_key(w: usize, h: usize, spot: &Spot, geom: &SpotGeom, base: &RgbIm
 pub(crate) fn apply_spot_cached(cache: &mut SpotCache, base: &mut RgbImage, spot: &Spot) {
     let w = base.width() as usize;
     let h = base.height() as usize;
-    let Some(geom) = spot_geometry(w, h, spot) else {
+    let Some(rect) = op_rect(w, h, spot) else {
         return;
     };
-    let key = spot_cache_key(w, h, spot, &geom, base);
+    if rect.w.saturating_mul(rect.h) > CACHE_MAX_PX {
+        apply_spot(base, spot);
+        return;
+    }
+    let key = spot_cache_key(w, h, spot, rect, base);
     if let Some(cached) = cache.map.get(&key) {
         write_region(base, &cached.rect, &cached.data);
         return;
     }
     apply_spot(base, spot);
     let region = CachedRegion {
-        rect: geom.rect,
-        data: read_region(base, &geom.rect),
+        rect,
+        data: read_region(base, &rect),
     };
     cache.insert(key, region);
 }
@@ -356,6 +568,129 @@ mod tests {
             hardness: 0.8,
             opacity: 1.0,
             kind: SpotKind::ProximityMatch,
+            path: None,
+        }
+    }
+
+    /// One fill per stroke vs one fill per dab, on a realistic 600 px stroke.
+    /// `cargo test --release --bin TinyLuma bench_stroke_vs_dabs -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bench_stroke_vs_dabs() {
+        use crate::retouch::brush::BrushSettings;
+        use std::time::Instant;
+        let (w, h) = (1200u32, 800u32);
+        let mut img = RgbImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let v = ((x * 7 + y * 3) % 200) as u8;
+                img.put_pixel(x, y, image::Rgb([v, 255 - v, v / 2]));
+            }
+        }
+        let brush = BrushSettings {
+            size: 60.0,
+            hardness: 0.5,
+            spacing: 0.25,
+            ..Default::default()
+        };
+        let path = [[0.25f32, 0.5], [0.75, 0.5]];
+
+        let stroke = brush.to_stroke(&path, w as usize, h as usize);
+        let mut single = img.clone();
+        let t = Instant::now();
+        apply_spot(&mut single, &stroke);
+        let single_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+        let dabs = brush.spots_along(&path, w as usize, h as usize);
+        let n = dabs.len();
+        let mut per_dab = img.clone();
+        let t = Instant::now();
+        for d in &dabs {
+            apply_spot(&mut per_dab, d);
+        }
+        let dabs_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+        println!("stroke single fill: {single_ms:.1} ms | {n} dabs: {dabs_ms:.1} ms");
+    }
+
+    /// A painted stroke is healed by one union fill: the whole band is repaired
+    /// and a far pixel is untouched.
+    #[test]
+    fn apply_stroke_heals_the_whole_band() {
+        use crate::retouch::brush::BrushSettings;
+        let (w, h) = (120u32, 80u32);
+        let mut img = RgbImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let v = (100.0 + (x as f32 / w as f32) * 80.0) as u8;
+                img.put_pixel(x, y, image::Rgb([v, v, v]));
+            }
+        }
+        // A dark band defect along the painted path.
+        for y in 36..44 {
+            for x in 20..100 {
+                img.put_pixel(x, y, image::Rgb([0, 0, 0]));
+            }
+        }
+        let far = *img.get_pixel(2, 2);
+        let brush = BrushSettings {
+            size: 30.0,
+            hardness: 1.0,
+            spacing: 0.25,
+            ..Default::default()
+        };
+        let stroke = brush.to_stroke(&[[0.2f32, 0.5], [0.8, 0.5]], w as usize, h as usize);
+        assert!(stroke.path.as_ref().is_some_and(|p| p.len() >= 2));
+
+        apply_spot(&mut img, &stroke);
+
+        assert_eq!(*img.get_pixel(2, 2), far, "far pixels must not change");
+        for x in [40u32, 60, 80] {
+            let got = img.get_pixel(x, 40).0[0] as i32;
+            let want = (100.0 + (x as f32 / w as f32) * 80.0) as i32;
+            assert!((got - want).abs() < 30, "x={x}: healed {got} vs background {want}");
+        }
+    }
+
+    /// The outer edge of a removed object must not survive: a dark ring at ~85%
+    /// of the brush radius has to be healed at the default hardness (the older
+    /// `hardness * r` core left a visible arc there).
+    #[test]
+    fn apply_spot_removes_object_at_the_brush_edge() {
+        let (w, h) = (160u32, 160u32);
+        let mut img = RgbImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                img.put_pixel(x, y, image::Rgb([190, 190, 190]));
+            }
+        }
+        // A dark ring at radius 34 in a brush of radius 40 (0.85 r).
+        let (cx, cy) = (80.0f32, 80.0f32);
+        for y in 0..h {
+            for x in 0..w {
+                let dx = x as f32 - cx;
+                let dy = y as f32 - cy;
+                let r = (dx * dx + dy * dy).sqrt();
+                if (33.0..35.0).contains(&r) {
+                    img.put_pixel(x, y, image::Rgb([40, 40, 40]));
+                }
+            }
+        }
+        let s = Spot {
+            center: [0.5, 0.5],
+            radius: 40.0 / 160.0,
+            hardness: 0.5,
+            opacity: 1.0,
+            kind: SpotKind::ContentAware,
+            path: None,
+        };
+        apply_spot(&mut img, &s);
+        for a in 0..16 {
+            let ang = a as f32 / 16.0 * std::f32::consts::TAU;
+            let x = (cx + ang.cos() * 34.0).round() as u32;
+            let y = (cy + ang.sin() * 34.0).round() as u32;
+            let v = img.get_pixel(x, y).0[0] as i32;
+            assert!(v > 150, "ring remained at angle {a}: {v}");
         }
     }
 
@@ -440,6 +775,7 @@ mod tests {
             hardness: 0.5,
             opacity: 1.0,
             kind: SpotKind::ContentAware,
+            path: None,
         };
         let spots = vec![mk(0.4), mk(0.6)];
 
@@ -494,6 +830,7 @@ mod tests {
                 hardness: 0.5,
                 opacity: 1.0,
                 kind: SpotKind::ProximityMatch,
+                path: None,
             };
             let mut copy = img.clone();
             let t = Instant::now();
@@ -523,6 +860,7 @@ mod tests {
                 hardness: 0.5,
                 opacity: 1.0,
                 kind: SpotKind::ContentAware,
+                path: None,
             };
             let mut copy = img.clone();
             let t = Instant::now();
@@ -555,6 +893,7 @@ mod tests {
                 hardness: 0.5,
                 opacity: 1.0,
                 kind: SpotKind::ContentAware,
+                path: None,
             })
             .collect();
 
