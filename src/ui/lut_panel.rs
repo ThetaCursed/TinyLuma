@@ -11,10 +11,17 @@ use crate::app::TinyLumaApp;
 use crate::lut_library::LutEntry;
 
 impl TinyLumaApp {
-    /// Right panel: active LUT and library. Returns true on change.
+    /// Right panel: presets, active LUT and library. Returns
+    /// `(color_changed, spatial_changed)`: a preset changes both, a LUT only
+    /// color.
     /// `visible == false` — the panel slides off the edge (on the screen without a frame).
-    pub(crate) fn draw_lut_panel(&mut self, ctx: &egui::Context, visible: bool) -> bool {
+    pub(crate) fn draw_lut_panel(
+        &mut self,
+        ctx: &egui::Context,
+        visible: bool,
+    ) -> (bool, bool) {
         let mut changed = false;
+        let mut spatial_changed = false;
         // The set of expanded categories changed — the config needs writing.
         let mut lut_categories_changed = false;
 
@@ -23,6 +30,16 @@ impl TinyLumaApp {
             .exact_width(super::PANEL_W)
             // See the left panel: the border is given by the background, not a line.
             .show_separator_line(false)
+            // Mirror the floating-scrollbar reserve (right) with an equal inset on the
+            // left, exactly like the left panel, so both panels have symmetric gutters.
+            .frame(
+                egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin {
+                    left: 8.0 + super::SCROLL_RESERVE,
+                    right: 8.0,
+                    top: 2.0,
+                    bottom: 2.0,
+                }),
+            )
             .show_animated(ctx, visible, |ui| {
                 // A neat scrollbar: thin and it does NOT balloon on hover
                 // (for the floating style the width = lerp(floating_width ..= bar_width),
@@ -58,9 +75,9 @@ impl TinyLumaApp {
 
                         if self.active_lut.is_some() {
                             ui.group(|ui| {
-                                // The footer does not scroll, so the scrollbar reserve
-                                // is not needed here: we stretch the group to the very edge of the panel
-                                // so the left and right paddings match (8px each).
+                                // The footer does not scroll, so the scrollbar reserve is not
+                                // needed here: we stretch the group to the panel's inner edge
+                                // (the frame's right inset).
                                 ui.set_width(ui.available_width().max(40.0));
                                 ui.spacing_mut().item_spacing.y = 4.0;
 
@@ -124,6 +141,15 @@ impl TinyLumaApp {
 
                         ui.add_space(8.0);
                     });
+
+                // ===== PRESETS (pinned above the library) =====
+                let (preset_color, preset_spatial) = self.show_presets_panel(ctx, ui);
+                if preset_color {
+                    changed = true;
+                }
+                if preset_spatial {
+                    spatial_changed = true;
+                }
 
                 // ===== LIBRARY =====
                 ui.add_space(5.0);
@@ -381,7 +407,7 @@ impl TinyLumaApp {
                 }
             });
 
-        changed
+        (changed, spatial_changed)
     }
 
     /// Grid of LUT chips, two per row. The column width is fixed — half the

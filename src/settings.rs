@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::pipeline::curve::ToneCurves;
+use crate::pipeline::hsl::HslSettings;
 
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize, Debug)]
 pub(crate) enum SaveFormat {
@@ -56,6 +57,9 @@ pub(crate) struct SaveSettings {
     /// four-entry `open_groups` array cannot break old configs).
     #[serde(default = "default_true")]
     pub(crate) open_curve_group: bool,
+    /// Open/closed state of the COLOR MIXER group (own field, same reason).
+    #[serde(default = "default_true")]
+    pub(crate) open_mixer_group: bool,
 }
 
 impl Default for SaveSettings {
@@ -74,6 +78,7 @@ impl Default for SaveSettings {
             brush_size: default_brush_size(),
             brush_hardness: default_brush_hardness(),
             open_curve_group: default_true(),
+            open_mixer_group: default_true(),
         }
     }
 }
@@ -155,6 +160,12 @@ pub(crate) struct FilterSettings {
     /// neutral diagonal.
     #[serde(default)]
     pub(crate) curves: ToneCurves,
+
+    /// 8-band HSL colour mixer. Applied in the color pass after Light and
+    /// before chroma (baked into the combined LUT); `serde(default)` keeps
+    /// older presets loading as a no-op mixer.
+    #[serde(default)]
+    pub(crate) hsl: HslSettings,
 }
 
 impl Default for FilterSettings {
@@ -180,6 +191,7 @@ impl Default for FilterSettings {
             grain: 0.0,
             grain_size: default_grain_size(),
             curves: ToneCurves::default(),
+            hsl: HslSettings::default(),
         }
     }
 }

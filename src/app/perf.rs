@@ -56,10 +56,11 @@ enum Slider {
     Grain,
     GrainSize,
     LutIntensity,
+    MixerSat,
 }
 
 impl Slider {
-    const ALL: [Slider; 17] = [
+    const ALL: [Slider; 18] = [
         Slider::Exposure,
         Slider::Contrast,
         Slider::Whites,
@@ -77,6 +78,7 @@ impl Slider {
         Slider::Grain,
         Slider::GrainSize,
         Slider::LutIntensity,
+        Slider::MixerSat,
     ];
 
     fn name(self) -> &'static str {
@@ -98,6 +100,7 @@ impl Slider {
             Slider::Grain => "Grain",
             Slider::GrainSize => "GrainSize",
             Slider::LutIntensity => "LutIntensity",
+            Slider::MixerSat => "MixerSat",
         }
     }
 
@@ -116,6 +119,7 @@ impl Slider {
                 | Slider::Vibrance
                 | Slider::Saturation
                 | Slider::LutIntensity
+                | Slider::MixerSat
         )
     }
 
@@ -139,6 +143,7 @@ impl Slider {
             Slider::Grain => s.grain += NUDGE,
             Slider::GrainSize => s.grain_size += NUDGE,
             Slider::LutIntensity => s.lut_intensity += NUDGE,
+            Slider::MixerSat => s.hsl.bands[0][1] += NUDGE,
         }
     }
 }

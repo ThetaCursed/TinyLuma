@@ -12,6 +12,7 @@ use crate::color::oklab::{linear_to_srgb, rgb_to_oklab, srgb_u8_linear_table};
 use crate::lut::Lut3D;
 use crate::pipeline::color::{ColorSettings, WhiteBalance, apply_chroma, gamut_map_linear};
 use crate::pipeline::curve::CurveTables;
+use crate::pipeline::hsl::apply_hsl;
 use crate::pipeline::light::{
     LightSettings, apply_light, contrast_from_slider, exposure_from_slider, unit_from_slider,
 };
@@ -75,6 +76,8 @@ impl TinyLumaApp {
 
         let wb_identity = wb.is_identity();
         let light_identity = light.is_identity();
+        let hsl_identity = settings.hsl.is_identity();
+        let hsl = settings.hsl;
         let chroma_identity = color.saturation.abs() < 1e-6 && color.vibrance.abs() < 1e-6;
 
         let lut_intensity = settings.lut_intensity / 100.0;
@@ -99,6 +102,11 @@ impl TinyLumaApp {
 
             if !light_identity {
                 apply_light(&mut p, &light);
+            }
+            // Colour mixer sits between Light and chroma so a tone change also
+            // changes how saturated the shifted hue reads.
+            if !hsl_identity {
+                apply_hsl(&mut p, &hsl);
             }
             if !chroma_identity {
                 apply_chroma(&mut p, &color);
@@ -1168,6 +1176,33 @@ mod tests {
         let lut = TinyLumaApp::bake_lut(&s, None, 33);
         let mapped = lut.apply(1.0, 1.0, 1.0);
         assert!((mapped[0] - 0.5).abs() < 0.02, "{mapped:?}");
+    }
+
+    #[test]
+    fn hsl_mixer_desaturates_red_only() {
+        let mut red = vec![255u8, 0, 0];
+        let mut blue = vec![0u8, 0, 255];
+        let mut s = FilterSettings::default();
+        s.hsl.bands[0][1] = -100.0; // desaturate the red band
+        TinyLumaApp::run_color_pass(&s, None, &mut red);
+        TinyLumaApp::run_color_pass(&s, None, &mut blue);
+        assert!(
+            (red[0] as i32 - red[1] as i32) < 20 && (red[0] as i32 - red[2] as i32) < 20,
+            "red not desaturated: {red:?}"
+        );
+        assert!(
+            blue[0] < 3 && blue[1] < 3 && blue[2] > 252,
+            "blue must be untouched: {blue:?}"
+        );
+    }
+
+    #[test]
+    fn hsl_mixer_bakes_into_the_lut() {
+        let mut s = FilterSettings::default();
+        s.hsl.bands[0][1] = -100.0;
+        let lut = TinyLumaApp::bake_lut(&s, None, 33);
+        let mapped = lut.apply(1.0, 0.0, 0.0);
+        assert!(mapped[0] - mapped[1] < 0.1, "red band not in LUT: {mapped:?}");
     }
 
     #[test]

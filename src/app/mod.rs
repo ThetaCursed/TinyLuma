@@ -103,6 +103,11 @@ pub(crate) struct TinyLumaApp {
     pub(crate) open_groups: [bool; 4],
     /// Open/closed state of the CURVES group (its own field, see `SaveSettings`).
     pub(crate) open_curve_group: bool,
+    /// Open/closed state of the COLOR MIXER group (its own field, so extending
+    /// the four-entry `open_groups` array cannot break old configs).
+    pub(crate) open_mixer_group: bool,
+    /// The colour-mixer band being edited (0..8). UI-only, never serialized.
+    pub(crate) mixer_band: usize,
     /// Tone-curve editor state: the channel being edited and, while dragging,
     /// the index of the grabbed control point.
     pub(crate) curve_channel: CurveChannel,
@@ -650,6 +655,8 @@ impl TinyLumaApp {
             split_position: saved.split_position,
             open_groups: saved.open_groups,
             open_curve_group: saved.open_curve_group,
+            open_mixer_group: saved.open_mixer_group,
+            mixer_band: 0,
             curve_channel: CurveChannel::Master,
             curve_drag: None,
             save_format: saved.format,

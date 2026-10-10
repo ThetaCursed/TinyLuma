@@ -353,6 +353,7 @@ impl TinyLumaApp {
             split_position: self.split_position,
             open_groups: self.open_groups,
             open_curve_group: self.open_curve_group,
+            open_mixer_group: self.open_mixer_group,
             postfix: self.batch_postfix.clone(),
             embed_png_metadata: self.embed_png_metadata,
             lut_favorites_only: self.lut_favorites_only,

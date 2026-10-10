@@ -17,9 +17,11 @@ pub(crate) const HERO_H: f32 = 520.0;
 /// stays symmetric.
 pub(crate) const PANEL_W: f32 = 280.0;
 
-/// How much room on the right of a side panel to reserve for the floating
-/// scrollbar. The scrollbar sits on the right, so on the left the content only
-/// takes the panel's normal margin, while on the right this reserve is added.
+/// How much room on a side panel to reserve for the floating scrollbar.
+/// The scrollbar sits on the right, so the content is narrowed on the right by
+/// this much; both side panels also add the same amount to their inner left
+/// margin, so the group gutters match on either side (and the two panels mirror
+/// each other).
 pub(crate) const SCROLL_RESERVE: f32 = 12.0;
 /// Height of the buttons in the side-panel footers ("Reset all settings",
 /// "Load LUT…"). Slightly taller than the standard 28px: such a button is much
@@ -57,7 +59,9 @@ pub(crate) mod filmstrip;
 pub(crate) mod histogram_panel;
 pub(crate) mod left_panel;
 pub(crate) mod lut_panel;
+pub(crate) mod mixer;
 pub(crate) mod notification;
+pub(crate) mod presets_panel;
 pub(crate) mod retouch_tool;
 pub(crate) mod toolbar;
 pub(crate) mod widgets;

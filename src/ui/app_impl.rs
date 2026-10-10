@@ -237,13 +237,13 @@ impl eframe::App for TinyLumaApp {
         // screen only the central "Get Started" card remains.
         let panels_visible = self.texture.is_some();
 
-        // Left panel (presets + sliders)
-        let (mut color_changed, spatial_changed) = self.show_left_panel(ctx, panels_visible);
+        // Left panel (histogram + sliders)
+        let (mut color_changed, mut spatial_changed) = self.show_left_panel(ctx, panels_visible);
 
-        // Right panel (LUT). Called BEFORE CentralPanel — this matters for centering.
-        if self.draw_lut_panel(ctx, panels_visible) {
-            color_changed = true;
-        }
+        // Right panel (presets + LUT). Called BEFORE CentralPanel — this matters for centering.
+        let (right_color_changed, right_spatial_changed) = self.draw_lut_panel(ctx, panels_visible);
+        color_changed |= right_color_changed;
+        spatial_changed |= right_spatial_changed;
         if color_changed {
             self.color_dirty = true;
         }
