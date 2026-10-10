@@ -120,6 +120,43 @@ pub const TINT_TRACK: [Color32; 5] = [
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Histogram
+// ─────────────────────────────────────────────────────────────────────────────
+// The channel colours are data-visualisation colours: they carry the meaning
+// (R/G/B) and their overlaps mix to yellow / cyan / magenta / grey.
+
+/// Histogram channel bars.
+pub const HIST_RED: Color32 = Color32::from_rgb(196, 58, 52);
+pub const HIST_GREEN: Color32 = Color32::from_rgb(62, 170, 70);
+pub const HIST_BLUE: Color32 = Color32::from_rgb(56, 104, 220);
+/// Overlap of two channels.
+pub const HIST_OVERLAP_RG: Color32 = Color32::from_rgb(190, 176, 60);
+pub const HIST_OVERLAP_GB: Color32 = Color32::from_rgb(58, 168, 186);
+pub const HIST_OVERLAP_RB: Color32 = Color32::from_rgb(170, 70, 170);
+/// Neutral base where all three channels overlap.
+pub const HIST_BASE: Color32 = Color32::from_gray(150);
+/// Clipping triangle when idle / when shown (on or hovered).
+pub const HIST_TRIANGLE_IDLE: Color32 = Color32::from_gray(90);
+pub const HIST_TRIANGLE_ACTIVE: Color32 = Color32::from_gray(150);
+
+/// The colour of a clipping triangle: the clipping channels mixed, white when
+/// all three clip; `None` when none clips.
+pub fn clip_indicator(channels: [bool; 3]) -> Option<Color32> {
+    let [r, g, b] = channels.map(|on| if on { 235 } else { 60 });
+    channels.contains(&true).then(|| Color32::from_rgb(r, g, b))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tone curve
+// ─────────────────────────────────────────────────────────────────────────────
+// Line colours of the curve editor. The master curve uses [TEXT] (neutral);
+// the per-channel curves carry the channel's colour.
+
+pub const CURVE_RED: Color32 = Color32::from_rgb(230, 92, 86);
+pub const CURVE_GREEN: Color32 = Color32::from_rgb(92, 200, 105);
+pub const CURVE_BLUE: Color32 = Color32::from_rgb(96, 148, 240);
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Overlays over images
 // ─────────────────────────────────────────────────────────────────────────────
 

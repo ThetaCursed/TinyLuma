@@ -556,6 +556,13 @@ impl TinyLumaApp {
                     }
                 });
 
+                // Histogram — directly under the presets and pinned, so it is
+                // always visible while the slider groups below it scroll.
+                ui.scope(|ui| {
+                    ui.set_max_width((ui.available_width() - super::SCROLL_RESERVE).max(0.0));
+                    self.show_histogram_panel(ui);
+                });
+
                 // Everything below the presets scrolls: the collapsible slider
                 // groups. No divider needed — the preset group has its own
                 // frame, which separates the fixed header from the list.
@@ -765,6 +772,45 @@ impl TinyLumaApp {
                     });
                     if color_open != self.open_groups[1] {
                         self.open_groups[1] = color_open;
+                        groups_changed = true;
+                    }
+
+                    ui.add_space(5.0);
+
+                    // --- CURVES ---
+                    let mut curve_name_clicked = false;
+                    let mut curve_header =
+                        egui::collapsing_header::CollapsingState::load_with_default_open(
+                            ui.ctx(),
+                            ui.make_persistent_id("group_curves"),
+                            self.open_curve_group,
+                        )
+                        .show_header(ui, |ui| {
+                            curve_name_clicked = ui
+                                .add(
+                                    egui::Label::new(format!("{} CURVES", ph::BEZIER_CURVE))
+                                        .selectable(false)
+                                        .sense(egui::Sense::click()),
+                                )
+                                .clicked();
+                        });
+                    if curve_name_clicked {
+                        curve_header.toggle();
+                    }
+                    let curve_open = curve_header.is_open();
+                    curve_header.body_unindented(|ui| {
+                        ui.group(|ui| {
+                            let (c, d) = self.show_curve_editor(ui);
+                            if c {
+                                color_changed = true;
+                            }
+                            if d {
+                                self.drag_active = true;
+                            }
+                        });
+                    });
+                    if curve_open != self.open_curve_group {
+                        self.open_curve_group = curve_open;
                         groups_changed = true;
                     }
 

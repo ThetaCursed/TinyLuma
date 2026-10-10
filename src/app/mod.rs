@@ -10,6 +10,7 @@ use std::time::Instant;
 
 use crate::history::{History, Snapshot};
 use crate::lut::Lut3D;
+use crate::pipeline::curve::CurveChannel;
 use crate::lut_library::LutLibrary;
 use crate::presets::PresetManager;
 use crate::session::Session;
@@ -19,6 +20,8 @@ use crate::ui::notification::Notification;
 pub(crate) mod export;
 pub(crate) mod image_io;
 mod processing;
+pub(crate) mod histogram;
+pub(crate) mod clipping;
 pub(crate) mod crop;
 pub(crate) mod retouch;
 #[cfg(test)]
@@ -40,6 +43,19 @@ pub(crate) struct TinyLumaApp {
     /// this forces the map to be recomputed at full quality.
     pub(crate) dehaze_cached_fast: bool,
     pub(crate) processed_pixels: Vec<u8>, // final result for display (final_buffer)
+    /// Output histogram of the current render (the HISTOGRAM panel).
+    pub(crate) histogram: histogram::Histogram,
+    /// Eased copy of the histogram bins that the panel actually draws. It is
+    /// lerped toward the rendered target every frame so moving a slider does not
+    /// make the plot jump; `histogram_display_path` makes a new image snap
+    /// instead of morphing from the previous one.
+    pub(crate) histogram_display: [[f32; 256]; 3],
+    pub(crate) histogram_display_path: Option<PathBuf>,
+    /// Clipping-warning view state (Histogram panel triangles + header toggle).
+    pub(crate) clipping: clipping::ClippingView,
+    /// The clipping overlay actually baked into the display texture, so a toggle
+    /// re-uploads only when it changes.
+    pub(crate) clip_overlay_applied: clipping::ClipOverlay,
     pub(crate) luma_cache: Vec<f32>,      // luma cache for spatial_pass (avoids reallocation)
     pub(crate) luma_cache_valid: bool,    // flag: is the luma_cache up to date?
     pub(crate) clarity_cache: Vec<f32>,   // blurred-map cache for Clarity (bilateral base)
@@ -85,6 +101,12 @@ pub(crate) struct TinyLumaApp {
     pub(crate) split_position: f32,
     /// Expansion state of the left-panel groups: [LIGHT, COLOR, DETAILS, EFFECTS].
     pub(crate) open_groups: [bool; 4],
+    /// Open/closed state of the CURVES group (its own field, see `SaveSettings`).
+    pub(crate) open_curve_group: bool,
+    /// Tone-curve editor state: the channel being edited and, while dragging,
+    /// the index of the grabbed control point.
+    pub(crate) curve_channel: CurveChannel,
+    pub(crate) curve_drag: Option<usize>,
     pub(crate) original_texture: Option<egui::TextureHandle>,
     pub(crate) is_dragging_split: bool,
     /// True while a left-drag is panning the image (classified at drag start).
@@ -540,6 +562,11 @@ impl TinyLumaApp {
             dehaze_applied: f32::NAN,
             dehaze_cached_fast: false,
             processed_pixels: Vec::new(),
+            histogram: histogram::Histogram::EMPTY,
+            histogram_display: [[0.0; 256]; 3],
+            histogram_display_path: None,
+            clipping: clipping::ClippingView::default(),
+            clip_overlay_applied: clipping::ClipOverlay::NONE,
             luma_cache: Vec::new(),
             luma_cache_valid: false,
             clarity_cache: Vec::new(),
@@ -622,6 +649,9 @@ impl TinyLumaApp {
                 .unwrap_or_default(),
             split_position: saved.split_position,
             open_groups: saved.open_groups,
+            open_curve_group: saved.open_curve_group,
+            curve_channel: CurveChannel::Master,
+            curve_drag: None,
             save_format: saved.format,
             save_quality: saved.quality,
             embed_png_metadata: saved.embed_png_metadata,

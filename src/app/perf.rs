@@ -167,6 +167,7 @@ fn baseline_settings() -> FilterSettings {
         lut_intensity: 85.0,
         grain: 30.0,
         grain_size: 60.0,
+        ..FilterSettings::default()
     }
 }
 

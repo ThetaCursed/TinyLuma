@@ -230,6 +230,10 @@ impl TinyLumaApp {
         self.preview_base = None;
         self.color_buffer.clear();
         self.processed_pixels.clear();
+        self.histogram = crate::app::histogram::Histogram::EMPTY;
+        self.histogram_display_path = None;
+        self.clipping.clear();
+        self.clip_overlay_applied = crate::app::clipping::ClipOverlay::NONE;
         self.color_buffer_valid = false;
         self.luma_cache.clear();
         self.luma_cache_valid = false;

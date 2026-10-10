@@ -11,6 +11,7 @@ use super::TinyLumaApp;
 use crate::color::oklab::{linear_to_srgb, rgb_to_oklab, srgb_u8_linear_table};
 use crate::lut::Lut3D;
 use crate::pipeline::color::{ColorSettings, WhiteBalance, apply_chroma, gamut_map_linear};
+use crate::pipeline::curve::CurveTables;
 use crate::pipeline::light::{
     LightSettings, apply_light, contrast_from_slider, exposure_from_slider, unit_from_slider,
 };
@@ -78,6 +79,11 @@ impl TinyLumaApp {
 
         let lut_intensity = settings.lut_intensity / 100.0;
 
+        // Tone curves are per-pixel too, so they bake into the same LUT. Composed
+        // per channel (master, then R/G/B) into 256-sample tables once per call.
+        let curves = settings.curves.bake();
+        let curves_identity = settings.curves.is_identity();
+
         buffer.par_chunks_mut(3).for_each(|pixel| {
             let mut lin = [
                 lin_lut[pixel[0] as usize],
@@ -102,6 +108,13 @@ impl TinyLumaApp {
             let mut r = linear_to_srgb(out[0]);
             let mut g = linear_to_srgb(out[1]);
             let mut b = linear_to_srgb(out[2]);
+
+            // Tone curve on display-referred values, before the creative LUT.
+            if !curves_identity {
+                r = CurveTables::read(&curves.r, r);
+                g = CurveTables::read(&curves.g, g);
+                b = CurveTables::read(&curves.b, b);
+            }
 
             if let Some(lut) = active_lut {
                 if lut_intensity > 0.0 {
@@ -1064,7 +1077,8 @@ impl TinyLumaApp {
         }
     }
 
-    /// Uploads `processed_pixels` and the base frame into GPU textures.
+    /// Uploads `processed_pixels` and the base frame into GPU textures, applies
+    /// the clipping warning overlay, and refreshes the output histogram.
     pub(crate) fn upload_preview_textures(&mut self, ctx: &egui::Context) {
         let (w, h) = match self.preview_base.as_ref() {
             Some(b) => (b.width() as usize, b.height() as usize),
@@ -1073,7 +1087,21 @@ impl TinyLumaApp {
 
         // The texture stays raw: orientation and straighten are drawn on the GPU
         // (a rotated quad mesh), so changing the angle is free and smooth.
-        let proc = if self.processed_pixels.len() == w * h * 3 {
+        let has_render = self.processed_pixels.len() == w * h * 3;
+
+        // Clipping warnings replace the shown pixels with the warning colours.
+        // They are a view aid, not an edit, so `processed_pixels` is untouched.
+        let overlay = self.clipping.overlay();
+        let mut clipped: Vec<u8>;
+        let proc: &[u8] = if overlay.any() {
+            clipped = if has_render {
+                self.processed_pixels.clone()
+            } else {
+                self.preview_base.as_ref().unwrap().as_raw().to_vec()
+            };
+            overlay.paint(&mut clipped);
+            &clipped
+        } else if has_render {
             &self.processed_pixels
         } else {
             self.preview_base.as_ref().unwrap().as_raw()
@@ -1085,6 +1113,14 @@ impl TinyLumaApp {
             self.texture =
                 Some(ctx.load_texture("preview", color_image, egui::TextureOptions::LINEAR));
         }
+
+        // The histogram is of the rendered output, never of the warning overlay.
+        self.histogram = if has_render {
+            super::histogram::Histogram::of_rgb8(&self.processed_pixels)
+        } else {
+            super::histogram::Histogram::of_rgb8(self.preview_base.as_ref().unwrap().as_raw())
+        };
+        self.clip_overlay_applied = overlay;
 
         let orig_image = {
             let base = self.preview_base.as_ref().unwrap();
@@ -1113,6 +1149,25 @@ mod tests {
         for (a, b) in buf.iter().zip(orig.iter()) {
             assert!((*a as i32 - *b as i32).abs() <= 1, "changed {a} vs {b}");
         }
+    }
+
+    #[test]
+    fn tone_curve_halves_the_output() {
+        // A master curve ending at 0.5 maps white to mid-grey.
+        let mut buf = vec![255u8, 255, 255];
+        let mut s = FilterSettings::default();
+        s.curves.master = crate::pipeline::curve::Curve::from_points(&[[0.0, 0.0], [1.0, 0.5]]);
+        TinyLumaApp::run_color_pass(&s, None, &mut buf);
+        assert!((buf[0] as i32 - 128).abs() <= 3, "not halved: {}", buf[0]);
+    }
+
+    #[test]
+    fn tone_curve_bakes_into_the_lut() {
+        let mut s = FilterSettings::default();
+        s.curves.master = crate::pipeline::curve::Curve::from_points(&[[0.0, 0.0], [1.0, 0.5]]);
+        let lut = TinyLumaApp::bake_lut(&s, None, 33);
+        let mapped = lut.apply(1.0, 1.0, 1.0);
+        assert!((mapped[0] - 0.5).abs() < 0.02, "{mapped:?}");
     }
 
     #[test]

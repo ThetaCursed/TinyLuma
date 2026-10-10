@@ -5,6 +5,8 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
+use crate::pipeline::curve::ToneCurves;
+
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize, Debug)]
 pub(crate) enum SaveFormat {
     Png,
@@ -50,6 +52,10 @@ pub(crate) struct SaveSettings {
     /// Retouch brush hardness, `0..1`.
     #[serde(default = "default_brush_hardness")]
     pub(crate) brush_hardness: f32,
+    /// Open/closed state of the CURVES group (its own field so extending the
+    /// four-entry `open_groups` array cannot break old configs).
+    #[serde(default = "default_true")]
+    pub(crate) open_curve_group: bool,
 }
 
 impl Default for SaveSettings {
@@ -67,8 +73,14 @@ impl Default for SaveSettings {
             open_lut_categories: BTreeSet::new(),
             brush_size: default_brush_size(),
             brush_hardness: default_brush_hardness(),
+            open_curve_group: default_true(),
         }
     }
+}
+
+/// Serde default for boolean options that start enabled.
+pub(crate) fn default_true() -> bool {
+    true
 }
 
 /// By default all left-panel groups are expanded.
@@ -137,6 +149,12 @@ pub(crate) struct FilterSettings {
     /// give coarser grain. `serde(default)` keeps older presets/configs loading.
     #[serde(default = "default_grain_size")]
     pub(crate) grain_size: f32,
+
+    /// Master + per-channel tone curves. Applied in the color pass (baked into
+    /// the combined LUT); `serde(default)` keeps older presets loading as a
+    /// neutral diagonal.
+    #[serde(default)]
+    pub(crate) curves: ToneCurves,
 }
 
 impl Default for FilterSettings {
@@ -161,6 +179,7 @@ impl Default for FilterSettings {
             lut_intensity: 0.0,
             grain: 0.0,
             grain_size: default_grain_size(),
+            curves: ToneCurves::default(),
         }
     }
 }

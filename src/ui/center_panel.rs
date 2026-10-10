@@ -23,6 +23,15 @@ impl TinyLumaApp {
         egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
             self.process_preview(ctx);
 
+            // The clipping toggle changes only view state: re-upload the display
+            // texture so the warning overlay follows it (the histogram itself is
+            // refreshed by `upload_preview_textures`).
+            if self.preview_base.is_some()
+                && self.clipping.overlay() != self.clip_overlay_applied
+            {
+                self.upload_preview_textures(ctx);
+            }
+
             if self.texture.is_some() {
                 // Canvas background — the dot grid of the "infinite canvas" is drawn
                 // in draw_image_viewport (in the letterbox, under the frame), so
