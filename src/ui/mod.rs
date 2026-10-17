@@ -15,7 +15,7 @@ pub(crate) const HERO_W: f32 = 760.0;
 pub(crate) const HERO_H: f32 = 520.0;
 /// Width of the side panels. Both (left and right) use one value, so the layout
 /// stays symmetric.
-pub(crate) const PANEL_W: f32 = 280.0;
+pub(crate) const PANEL_W: f32 = 300.0;
 
 /// How much room on a side panel to reserve for the floating scrollbar.
 /// The scrollbar sits on the right, so the content is narrowed on the right by
@@ -30,7 +30,7 @@ pub(crate) const SCROLL_RESERVE: f32 = 12.0;
 pub(crate) const FOOTER_BTN_H: f32 = 32.0;
 /// Minimum editing-mode window size: both side panels (PANEL_W * 2) plus a
 /// working center where the toolbar and the button row fit without overlapping.
-pub(crate) const EDIT_MIN_W: f32 = 1020.0;
+pub(crate) const EDIT_MIN_W: f32 = 1060.0;
 pub(crate) const EDIT_MIN_H: f32 = 600.0;
 /// "Normal" editor window size: restore down returns to this. Otherwise the
 /// window would restore to the hero size and the layout would be squeezed.

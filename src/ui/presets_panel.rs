@@ -27,9 +27,11 @@ impl TinyLumaApp {
         let mut color_changed = false;
         let mut spatial_changed = false;
 
+        // The PRESETS block is pinned above the scrolling library, so the
+        // floating scrollbar never overlaps it — no need to reserve room on the
+        // right: the selector and the button rows span the panel's full content
+        // width (like the ACTIVE LUT footer below).
         ui.scope(|ui| {
-            ui.set_max_width((ui.available_width() - super::SCROLL_RESERVE).max(0.0));
-
             // ==========================================
             // PRESETS
             // ==========================================

@@ -687,6 +687,11 @@ fn snap_to_step(value: f32, min: f32, step: f32) -> f32 {
     (v * factor).round() / factor
 }
 
+/// How much the rail lifts (a white overlay's alpha) on hover and while
+/// dragging: enough to read the active control at a glance, without an outline.
+const RAIL_LIFT_HOVER: u8 = 8;
+const RAIL_LIFT_DRAG: u8 = 14;
+
 /// Horizontal slider used for every parameter rail. Draws either a colour
 /// gradient (`stops`) or a solid theme rail; `fill_origin` paints an accent
 /// segment from that value to the handle (so bipolar sliders stay uncoloured at
@@ -743,10 +748,17 @@ pub(crate) fn rail_slider(
     }
 
     if ui.is_rect_visible(rect) {
-        let visuals = ui.style().interact(&response);
-        let base = theme::SLIDER_RAIL;
         let rounding = ui.visuals().widgets.inactive.rounding;
-        let accent = ui.visuals().selection.bg_fill;
+        let base = theme::SLIDER_RAIL;
+        // On hover/drag the whole rail lifts a touch, so the active control is
+        // readable at a glance while the eyes stay on the photo.
+        let lift = if response.dragged() {
+            RAIL_LIFT_DRAG
+        } else if response.hovered() {
+            RAIL_LIFT_HOVER
+        } else {
+            0
+        };
 
         let x_of = |t: f32| egui::lerp(track.min..=track.max, t.clamp(0.0, 1.0));
         let value_t = if span > 0.0 {
@@ -761,11 +773,22 @@ pub(crate) fn rail_slider(
                 ui.painter().rect_filled(rail, rounding, base);
             }
         }
+        if lift > 0 {
+            ui.painter().rect_filled(
+                rail,
+                rounding,
+                theme::with_alpha(egui::Color32::WHITE, lift),
+            );
+        }
 
-        // Fill from the neutral origin to the current value, fading out toward
-        // the origin so there is no hard "volume bar". Unipolar sliders start
-        // at their origin, so they fade from the left edge; bipolar sliders also
-        // get a short tick marking the neutral point.
+        // Lightroom-style fill: a solid accent segment from the neutral
+        // origin to the handle (no fade), so the amount dialled in is
+        // unambiguous. It brightens a touch while dragging.
+        let fill_color = if response.dragged() {
+            theme::ACCENT_HOVER
+        } else {
+            theme::ACCENT
+        };
         if let Some(origin) = fill_origin {
             let origin_t = if span > 0.0 {
                 ((origin - min) / span).clamp(0.0, 1.0)
@@ -773,42 +796,76 @@ pub(crate) fn rail_slider(
                 0.0
             };
             let (xa, xb) = (x_of(origin_t), x_of(value_t));
+            // Unipolar fills start at the visual beginning of the rail, not at
+            // the handle's travel limit (which is inset by its radius):
+            // otherwise the blue pill visibly starts ~7 px into the track.
+            let xa = if origin_t <= 0.0 { rail.left() } else { xa };
             let (left, right) = (xa.min(xb), xa.max(xb));
-
-            // Tick only where the origin sits strictly inside the rail.
-            if min < 0.0 && origin_t > 0.01 && origin_t < 0.99 {
-                let x = x_of(origin_t);
-                let half = rail.height() * 0.9;
-                ui.painter().line_segment(
-                    [
-                        egui::pos2(x, rail.center().y - half),
-                        egui::pos2(x, rail.center().y + half),
-                    ],
-                    egui::Stroke::new(1.5, theme::with_alpha(theme::TEXT_SECONDARY, 170)),
-                );
-            }
 
             let seg = egui::Rect::from_min_max(
                 egui::pos2(left, rail.top()),
                 egui::pos2(right, rail.bottom()),
             );
-            if seg.width() > seg.height() {
-                let clear = egui::Color32::TRANSPARENT;
-                let fill_stops: [egui::Color32; 2] = if value_t >= origin_t {
-                    [clear, accent]
-                } else {
-                    [accent, clear]
-                };
-                paint_gradient_rail(ui.painter(), seg, &fill_stops);
+            if value_t != origin_t && seg.width() > 0.0 {
+                // The rounding is clamped to the rail height by the
+                // tessellator, so the segment reads as a pill on the track.
+                ui.painter().rect_filled(seg, rounding, fill_color);
             }
         }
 
+        // Neutral tick: a reference on every bipolar rail, solid or gradient
+        // (temp/tint/hue included). A light core with a soft dark halo reads on
+        // the plain grey rail and on every coloured gradient stop alike. It
+        // spans exactly the rail height and is drawn over the fill so it stays
+        // crisp.
+        if min < 0.0 && span > 0.0 {
+            let neutral_t = (default - min) / span;
+            if neutral_t > 0.01 && neutral_t < 0.99 {
+                let x = x_of(neutral_t);
+                // The stroke is centred on the line: inset by half its width so
+                // nothing pokes out above or below the track.
+                let stroke_w = 1.5;
+                let half = (rail.height() - stroke_w).max(0.0) * 0.5;
+                let ends = [
+                    egui::pos2(x, rail.center().y - half),
+                    egui::pos2(x, rail.center().y + half),
+                ];
+                ui.painter()
+                    .line_segment(ends, egui::Stroke::new(stroke_w + 1.5, theme::HALO_DARK));
+                ui.painter().line_segment(
+                    ends,
+                    egui::Stroke::new(stroke_w, theme::with_alpha(theme::TEXT, 220)),
+                );
+            }
+        }
+
+        // Handle: idle outline, a slightly larger light ring on hover, an
+        // accent ring while dragging. Same footprint, clearer state.
+        let (fill, stroke, grow) = if response.dragged() {
+            (
+                theme::BG_ELEVATED,
+                egui::Stroke::new(1.5, theme::ACCENT),
+                1.0,
+            )
+        } else if response.hovered() {
+            (
+                theme::BG_ELEVATED,
+                egui::Stroke::new(1.0, theme::TEXT),
+                0.5,
+            )
+        } else {
+            (
+                theme::BG_SURFACE,
+                egui::Stroke::new(1.0, theme::TEXT),
+                0.0,
+            )
+        };
         let center = egui::pos2(x_of(value_t), rect.center().y);
         ui.painter().add(egui::epaint::CircleShape {
             center,
-            radius: handle_radius + visuals.expansion,
-            fill: visuals.bg_fill,
-            stroke: visuals.fg_stroke,
+            radius: handle_radius + grow,
+            fill,
+            stroke,
         });
     }
 

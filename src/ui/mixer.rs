@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 ThetaCursed
 
-//! The colour mixer body: 8 band chips (Lightroom order) and the three
+//! The colour mixer body: 8 band dots (Lightroom order) and the three
 //! Hue / Saturation / Luminance sliders for the selected band. Drawing and
 //! input only — the math lives in `src/pipeline/hsl.rs`.
 
@@ -14,35 +14,61 @@ use crate::theme;
 use crate::ui::widgets::labeled_slider_gradient;
 
 impl TinyLumaApp {
-    /// The COLOR MIXER group body: band chips + Hue/Saturation/Luminance.
+    /// The COLOR MIXER group body: band dots + Hue/Saturation/Luminance.
     /// Returns `(changed, dragging)`.
     pub(crate) fn show_color_mixer(&mut self, ui: &mut egui::Ui) -> (bool, bool) {
         let mut changed = false;
         let mut dragging = false;
         let band = self.mixer_band.min(HSL_BANDS - 1);
 
-        // --- band colour chips (single row) ---
-        let gap = 3.0;
+        // --- selected band name + reset (above the band dots) ---
+        ui.horizontal(|ui| {
+            ui.add(egui::Label::new(
+                egui::RichText::new(BAND_NAMES[band]).size(12.0).color(theme::TEXT),
+            ));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let any = !self.settings.hsl.is_identity();
+                if ui
+                    .add_enabled(
+                        any,
+                        egui::Button::new(ph::ARROW_COUNTER_CLOCKWISE).frame(false),
+                    )
+                    .on_hover_text("Reset all color mixer bands")
+                    .clicked()
+                {
+                    self.settings.hsl.bands = [[0.0; 3]; HSL_BANDS];
+                    changed = true;
+                }
+            });
+        });
+        ui.add_space(6.0);
+
+        // --- band colour dots (single row) ---
         let count = HSL_BANDS;
         let avail = ui.available_width();
-        let chip_w = ((avail - gap * (count as f32 - 1.0)) / count as f32).clamp(18.0, 32.0);
+        // Eight circles with even gaps, spanning the panel like the old chips.
+        let diameter = 24.0;
+        let gap = ((avail - diameter * count as f32) / (count as f32 - 1.0))
+            .clamp(2.0, 12.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = gap;
             for (i, name) in BAND_NAMES.iter().enumerate() {
-                let (rect, resp) =
-                    ui.allocate_exact_size(egui::vec2(chip_w, 22.0), egui::Sense::click());
+                let (rect, resp) = ui.allocate_exact_size(
+                    egui::vec2(diameter, diameter),
+                    egui::Sense::click(),
+                );
                 let selected = i == band;
                 let painter = ui.painter();
-                painter.rect_filled(rect, theme::RADIUS_SM, band_color(i));
-                painter.rect_stroke(
-                    rect,
-                    theme::RADIUS_SM,
-                    if selected {
-                        egui::Stroke::new(2.0, theme::TEXT)
-                    } else {
-                        egui::Stroke::new(1.0, theme::SEPARATOR)
-                    },
-                );
+                let center = rect.center();
+                let r = diameter * 0.5;
+                painter.circle_filled(center, r, band_color(i));
+                let stroke = if selected {
+                    egui::Stroke::new(2.0, theme::TEXT)
+                } else {
+                    egui::Stroke::new(1.0, theme::SEPARATOR)
+                };
+                // Draw the ring inside the disc so it stays within its slot.
+                painter.circle_stroke(center, r - stroke.width * 0.5, stroke);
                 if resp.clicked() {
                     self.mixer_band = i;
                 }
@@ -51,27 +77,6 @@ impl TinyLumaApp {
         });
 
         ui.add_space(4.0);
-
-        // --- selected band name + reset ---
-        ui.horizontal(|ui| {
-            ui.add(egui::Label::new(
-                egui::RichText::new(BAND_NAMES[band]).size(12.0).color(theme::TEXT),
-            ));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let any = self.settings.hsl.bands[band].iter().any(|v| v.abs() > 1e-6);
-                if ui
-                    .add_enabled(
-                        !any,
-                        egui::Button::new(ph::ARROW_COUNTER_CLOCKWISE).frame(false),
-                    )
-                    .on_hover_text("Reset this band")
-                    .clicked()
-                {
-                    self.settings.hsl.bands[band] = [0.0; 3];
-                    changed = true;
-                }
-            });
-        });
 
         // --- the three band sliders (coloured rails) ---
         // The gradients follow `pipeline::hsl`'s own scales so the colour under
@@ -135,7 +140,7 @@ impl TinyLumaApp {
     }
 }
 
-/// The chip colour of band `i` (an approximate fully-saturated hue swatch).
+/// The dot colour of band `i` (an approximate fully-saturated hue swatch).
 fn band_color(i: usize) -> egui::Color32 {
     const COLORS: [egui::Color32; HSL_BANDS] = [
         egui::Color32::from_rgb(224, 62, 62),   // Red

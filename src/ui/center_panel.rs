@@ -227,21 +227,28 @@ impl TinyLumaApp {
                                 // --- Resume the last edited session (if any) ---
                                 // Sits above the open actions and reads as the
                                 // "welcome back" path, while opening stays primary.
+                                // It spans exactly the two buttons below, but is a
+                                // touch taller: it carries two lines of text.
                                 if let Some((name, edits)) = self.resume_label() {
                                     if super::widgets::session_resume_row(
                                         ui,
                                         &name,
                                         edits,
-                                        egui::vec2(ui.available_width(), 54.0),
+                                        egui::vec2(btn_size.x * 2.0 + gap, btn_size.y + 8.0),
                                     )
                                     .clicked()
                                     {
                                         continue_session = true;
                                     }
-                                    ui.add_space(14.0);
+                                    ui.add_space(8.0);
                                 }
 
                                 ui.horizontal(|ui| {
+                                    // Use only the explicit gap: the default item
+                                    // spacing would add ~8 px between the buttons and
+                                    // make their outer span wider than the resume row
+                                    // above (which uses exactly btn*2 + gap).
+                                    ui.spacing_mut().item_spacing.x = 0.0;
                                     let total = btn_size.x * 2.0 + gap;
                                     let pad = ((ui.available_width() - total) / 2.0).max(0.0);
                                     ui.add_space(pad);

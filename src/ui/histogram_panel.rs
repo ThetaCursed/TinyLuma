@@ -18,8 +18,9 @@ use crate::app::clipping::{self, ClipSide};
 use crate::app::TinyLumaApp;
 use crate::theme;
 
-/// Height of the histogram window.
-const HIST_H: f32 = 90.0;
+/// Height of the histogram window. Chosen to sit in balance with the panel
+/// width (a little under 2.2:1).
+const HIST_H: f32 = 120.0;
 /// Bars are inset by this much so they stay inside the rounded corners.
 const PLOT_INSET: f32 = 5.0;
 
